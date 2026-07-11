@@ -102,4 +102,6 @@ it('keeps the checked-in Buildroot and Actions ccache policy enabled and bounded
   expect(workflow).toContain('path: appliances/v86/.work/ccache');
   expect(workflow).toContain('BR2_CCACHE_DIR: ${{ github.workspace }}/appliances/v86/.work/ccache');
   expect(workflow).toContain('native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-');
+  expect(workflow.match(/if: github\.event_name == 'workflow_dispatch' && github\.ref == 'refs\/heads\/master'/g))
+    .toHaveLength(2);
 });

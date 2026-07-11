@@ -101,6 +101,7 @@ jobs:
 
       - name: Restore the verified native bundle
         id: native_bundle_cache
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: appliances/v86/dist
@@ -146,7 +147,7 @@ jobs:
           key: native-v86-downloads-${{ hashFiles('appliances/v86/versions.env', 'appliances/v86/buildroot/**') }}
 
       - name: Restore the Buildroot compiler cache
-        if: steps.native_bundle_cache.outputs.cache-hit != 'true'
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && steps.native_bundle_cache.outputs.cache-hit != 'true'
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: appliances/v86/.work/ccache

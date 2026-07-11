@@ -81,11 +81,13 @@ downloads are cached separately. Cache actions save new entries only after the
 entire job succeeds; the multi-gigabyte intermediate Buildroot tree is never
 cached. Bump the `native-v86-ccache-v1` namespace when changing the compiler or
 toolchain configuration, as Buildroot cannot safely infer that incompatibility.
-GitHub scopes caches by ref: successful manual runs on `master` refresh the
-shared default-branch baseline that tag runs can restore, while a cache newly
-saved by one tag is not visible to a sibling tag. Prefer a `master` workflow
-dispatch when advancing that rolling baseline; the release still requires the
-protected publish approval.
+
+Compiled bundle and ccache restores are deliberately limited to manual runs on
+`master`. Tag-triggered releases build from source and cannot restore or seed
+compiled-output caches; they retain only hash-verified source downloads. This
+keeps an unsigned tag-scoped Actions cache outside the release provenance
+boundary. Use a `master` workflow dispatch for the fast, rolling cache path;
+the OCI publish step still requires the protected-environment approval.
 
 Configure these repository Actions values:
 
