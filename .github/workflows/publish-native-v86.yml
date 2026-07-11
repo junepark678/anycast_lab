@@ -91,13 +91,30 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Calculate the appliance build-input digest
+        id: appliance_inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest=$(node appliances/v86/scripts/appliance-cache-key.mjs)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the verified native bundle
+        id: native_bundle_cache
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: appliances/v86/dist
+          key: native-v86-bundle-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}
+
       - name: Reclaim hosted-runner disk space
+        if: steps.native_bundle_cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
           df -h "$GITHUB_WORKSPACE"
 
       - name: Install Buildroot host dependencies
+        if: steps.native_bundle_cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
@@ -120,6 +137,7 @@ jobs:
             xz-utils
 
       - name: Restore pinned source downloads
+        if: steps.native_bundle_cache.outputs.cache-hit != 'true'
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: |
@@ -127,12 +145,34 @@ jobs:
             appliances/v86/.work/buildroot-downloads
           key: native-v86-downloads-${{ hashFiles('appliances/v86/versions.env', 'appliances/v86/buildroot/**') }}
 
+      - name: Restore the Buildroot compiler cache
+        if: steps.native_bundle_cache.outputs.cache-hit != 'true'
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: appliances/v86/.work/ccache
+          key: native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('appliances/v86/versions.env') }}-${{ github.run_id }}
+          restore-keys: |
+            native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('appliances/v86/versions.env') }}-
+
       - name: Build the pinned native appliance
+        if: steps.native_bundle_cache.outputs.cache-hit != 'true'
         env:
+          BR2_CCACHE_DIR: ${{ github.workspace }}/appliances/v86/.work/ccache
           JOBS: '2'
         run: ./appliances/v86/scripts/build-image.sh
 
+      - name: Verify the restored or built native bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_line=$(node appliances/v86/scripts/verify-manifest.mjs appliances/v86/dist/manifest.json)
+          if [[ "$manifest_line" != "$(cat appliances/v86/dist/manifest.sha256)" ]]; then
+            echo 'Native bundle cache failed manifest verification' >&2
+            exit 1
+          fi
+
       - name: Discard the large intermediate build tree
+        if: steps.native_bundle_cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail

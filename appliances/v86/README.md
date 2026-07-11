@@ -69,6 +69,19 @@ the digest-addressed OCI Object Storage key
 `channels/<channel>/status.json` last. Tag pushes matching `v86-*` advance the
 `stable` channel; a manual run can select another channel.
 
+The workflow first caches the final roughly 20 MiB bundle, keyed by a digest of
+the pinned versions, Buildroot external tree, image builder, manifest template,
+and verifier plus the runner OS and architecture. A cache hit skips the large
+Buildroot compile, but it does not skip bundle hash validation, TypeScript,
+lint, unit/integration tests, the production build, or native Playwright tests.
+On a bundle miss, Buildroot's native `ccache` integration restores a rolling,
+1 GiB compiler cache scoped by pinned versions and runner platform, so image or
+rootfs changes can reuse compatible host and target compilation results. Source
+downloads are cached separately. Cache actions save new entries only after the
+entire job succeeds; the multi-gigabyte intermediate Buildroot tree is never
+cached. Bump the `native-v86-ccache-v1` namespace when changing the compiler or
+toolchain configuration, as Buildroot cannot safely infer that incompatibility.
+
 Configure these repository Actions values:
 
 - environment secret `OCI_PAR_BASE_URL` in the protected

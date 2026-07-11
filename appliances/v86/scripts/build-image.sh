@@ -44,6 +44,9 @@ make -C "$BUILDROOT" O="$OUTPUT" BR2_EXTERNAL="$ROOT/buildroot" \
 make -C "$BUILDROOT" O="$OUTPUT" BR2_EXTERNAL="$ROOT/buildroot" \
   BR2_DL_DIR="$BUILDROOT_DOWNLOADS" BR2_LOCALVERSION="$BUILDROOT_VERSION" \
   -j"$JOBS"
+make -C "$BUILDROOT" O="$OUTPUT" BR2_EXTERNAL="$ROOT/buildroot" \
+  BR2_DL_DIR="$BUILDROOT_DOWNLOADS" BR2_LOCALVERSION="$BUILDROOT_VERSION" \
+  ccache-stats
 
 # Guard the integration seams that Buildroot package/layout changes could
 # otherwise turn into silent no-ops in post-build.sh.
