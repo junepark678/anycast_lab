@@ -81,6 +81,11 @@ downloads are cached separately. Cache actions save new entries only after the
 entire job succeeds; the multi-gigabyte intermediate Buildroot tree is never
 cached. Bump the `native-v86-ccache-v1` namespace when changing the compiler or
 toolchain configuration, as Buildroot cannot safely infer that incompatibility.
+GitHub scopes caches by ref: successful manual runs on `master` refresh the
+shared default-branch baseline that tag runs can restore, while a cache newly
+saved by one tag is not visible to a sibling tag. Prefer a `master` workflow
+dispatch when advancing that rolling baseline; the release still requires the
+protected publish approval.
 
 Configure these repository Actions values:
 
