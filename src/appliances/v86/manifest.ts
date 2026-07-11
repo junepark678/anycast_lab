@@ -4,7 +4,7 @@ export const PINNED_BUILDROOT_VERSION = '2026.02.3' as const;
 export const PINNED_BIRD_VERSION = '2.15.1' as const;
 export const PINNED_FRR_VERSION = '10.5.1' as const;
 export const PINNED_LLVM_VERSION = '21.1.8' as const;
-export const V86_IMAGE_BUILD_ID = 'anycastlab-v86-br2026.02.3-r2' as const;
+export const V86_IMAGE_BUILD_ID = 'anycastlab-v86-br2026.02.3-r3' as const;
 
 export type V86ArtifactId = 'v86-wasm' | 'bios' | 'vga-bios' | 'bzimage';
 export type V86PgoMode = 'none' | 'generate' | 'use';

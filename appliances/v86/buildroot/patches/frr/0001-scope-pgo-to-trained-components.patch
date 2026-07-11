@@ -1,0 +1,87 @@
+diff --git a/bgpd/subdir.am b/bgpd/subdir.am
+index c59a669..8efa257 100644
+--- a/bgpd/subdir.am
++++ b/bgpd/subdir.am
+@@ -23,0 +24,2 @@ endif
++bgpd_libbgp_a_CFLAGS = $(AM_CFLAGS) $(ANYCAST_FRR_BGPD_PGO_CFLAGS)
++
+@@ -190,0 +193,2 @@ bgpd_bgpd_SOURCES = bgpd/bgp_main.c
++bgpd_bgpd_CFLAGS = $(AM_CFLAGS) $(ANYCAST_FRR_BGPD_PGO_CFLAGS)
++bgpd_bgpd_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_BGPD_PGO_LDFLAGS)
+@@ -191,0 +196 @@ bgpd_bgp_btoa_SOURCES = bgpd/bgp_btoa.c
++bgpd_bgp_btoa_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_BGPD_PGO_LDFLAGS)
+diff --git a/lib/compiler.h b/lib/compiler.h
+index d52db13..a6aa30d 100644
+--- a/lib/compiler.h
++++ b/lib/compiler.h
+@@ -74 +74,3 @@ extern "C" {
+-#if __has_attribute(hot)
++/* LLVM IR PGO supplies measured hotness.  A manual hot annotation conflicts
++ * with a valid cold profile and is diagnosed by the ThinLTO backend. */
++#if __has_attribute(hot) && !defined(ANYCAST_LLVM_IR_PGO)
+diff --git a/lib/subdir.am b/lib/subdir.am
+index 44090e6..a8cab4b 100644
+--- a/lib/subdir.am
++++ b/lib/subdir.am
+@@ -6 +6,2 @@ lib_LTLIBRARIES += lib/libfrr.la
+-lib_libfrr_la_LDFLAGS = $(LIB_LDFLAGS) -version-info 0:0:0 -Xlinker -e_libfrr_version
++lib_libfrr_la_CFLAGS = $(AM_CFLAGS) $(ANYCAST_FRR_LIBFRR_PGO_CFLAGS)
++lib_libfrr_la_LDFLAGS = $(LIB_LDFLAGS) -version-info 0:0:0 -Xlinker -e_libfrr_version $(ANYCAST_FRR_LIBFRR_PGO_LDFLAGS)
+diff --git a/mgmtd/subdir.am b/mgmtd/subdir.am
+index 14544c4..c915662 100644
+--- a/mgmtd/subdir.am
++++ b/mgmtd/subdir.am
+@@ -24 +24 @@ nodist_mgmtd_libmgmt_be_nb_la_SOURCES = \
+-mgmtd_libmgmt_be_nb_la_CFLAGS = $(AM_CFLAGS) -DINCLUDE_MGMTD_CMDDEFS_ONLY
++mgmtd_libmgmt_be_nb_la_CFLAGS = $(AM_CFLAGS) -DINCLUDE_MGMTD_CMDDEFS_ONLY $(ANYCAST_FRR_LIBMGMT_BE_NB_PGO_CFLAGS)
+@@ -26 +26 @@ mgmtd_libmgmt_be_nb_la_CPPFLAGS = $(AM_CPPFLAGS) -DINCLUDE_MGMTD_CMDDEFS_ONLY
+-mgmtd_libmgmt_be_nb_la_LDFLAGS = -version-info 0:0:0
++mgmtd_libmgmt_be_nb_la_LDFLAGS = -version-info 0:0:0 $(ANYCAST_FRR_LIBMGMT_BE_NB_PGO_LDFLAGS)
+diff --git a/ospfclient/subdir.am b/ospfclient/subdir.am
+index 2bf3254..98a8b8a 100644
+--- a/ospfclient/subdir.am
++++ b/ospfclient/subdir.am
+@@ -30,0 +31 @@ endif
++ospfclient_ospfclient_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_OSPFD_PGO_LDFLAGS)
+diff --git a/ospfd/subdir.am b/ospfd/subdir.am
+index 4803aae..0affb22 100644
+--- a/ospfd/subdir.am
++++ b/ospfd/subdir.am
+@@ -15,0 +16 @@ endif
++ospfd_libfrrospfclient_a_CFLAGS = $(AM_CFLAGS) $(ANYCAST_FRR_OSPFD_PGO_CFLAGS)
+@@ -20,0 +22 @@ ospfd_libfrrospfclient_a_SOURCES = \
++ospfd_libfrrospf_a_CFLAGS = $(AM_CFLAGS) $(ANYCAST_FRR_OSPFD_PGO_CFLAGS)
+@@ -113,0 +116,2 @@ ospfd_ospfd_LDADD = ospfd/libfrrospf.a ospfd/libfrrospfclient.a lib/libfrr.la $(
++ospfd_ospfd_CFLAGS = $(AM_CFLAGS) $(ANYCAST_FRR_OSPFD_PGO_CFLAGS)
++ospfd_ospfd_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_OSPFD_PGO_LDFLAGS)
+diff --git a/tests/bgpd/subdir.am b/tests/bgpd/subdir.am
+index 97845ec..101fdcf 100644
+--- a/tests/bgpd/subdir.am
++++ b/tests/bgpd/subdir.am
+@@ -10,0 +11 @@ tests_bgpd_test_aspath_CFLAGS = $(TESTS_CFLAGS)
++tests_bgpd_test_aspath_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_BGPD_PGO_LDFLAGS)
+@@ -20,0 +22 @@ tests_bgpd_test_bgp_table_CFLAGS = $(TESTS_CFLAGS)
++tests_bgpd_test_bgp_table_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_BGPD_PGO_LDFLAGS)
+@@ -29,0 +32 @@ tests_bgpd_test_capability_CFLAGS = $(TESTS_CFLAGS)
++tests_bgpd_test_capability_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_BGPD_PGO_LDFLAGS)
+@@ -39,0 +43 @@ tests_bgpd_test_ecommunity_CFLAGS = $(TESTS_CFLAGS)
++tests_bgpd_test_ecommunity_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_BGPD_PGO_LDFLAGS)
+@@ -49,0 +54 @@ tests_bgpd_test_mp_attr_CFLAGS = $(TESTS_CFLAGS)
++tests_bgpd_test_mp_attr_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_BGPD_PGO_LDFLAGS)
+@@ -58,0 +64 @@ tests_bgpd_test_packet_CFLAGS = $(TESTS_CFLAGS)
++tests_bgpd_test_packet_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_BGPD_PGO_LDFLAGS)
+@@ -67,0 +74 @@ tests_bgpd_test_peer_attr_CFLAGS = $(TESTS_CFLAGS)
++tests_bgpd_test_peer_attr_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_BGPD_PGO_LDFLAGS)
+diff --git a/tests/ospfd/subdir.am b/tests/ospfd/subdir.am
+index 5ed5b9d..a3b4023 100644
+--- a/tests/ospfd/subdir.am
++++ b/tests/ospfd/subdir.am
+@@ -13,0 +14 @@ tests_ospfd_test_ospf_spf_CFLAGS = $(TESTS_CFLAGS)
++tests_ospfd_test_ospf_spf_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_OSPFD_PGO_LDFLAGS)
+diff --git a/zebra/subdir.am b/zebra/subdir.am
+index b7c3024..ed268c4 100644
+--- a/zebra/subdir.am
++++ b/zebra/subdir.am
+@@ -33,0 +34,2 @@ endif
++zebra_zebra_CFLAGS = $(AM_CFLAGS) $(ANYCAST_FRR_ZEBRA_PGO_CFLAGS)
++zebra_zebra_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_ZEBRA_PGO_LDFLAGS)

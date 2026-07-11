@@ -51,11 +51,29 @@ ANYCAST_PGO_MODE=use \
 
 The fixed training workload boots real BIRD and FRR guests, establishes BGP
 and OSPF, installs and withdraws routes, flaps a link, and waits for
-reconvergence. BIRD and FRR profiles stay separate. The profile-set seal binds
-them to the exact appliance, compiler, flags, runtime collector, and training
-inputs; stale or altered profiles fail closed. The final manifest records the
-compiler, optimization mode, profile-set key, and per-daemon profile digests,
-and OCI publication accepts only `pgo.mode: "use"` bundles.
+reconvergence. BIRD has one indexed profile. Every FRR raw profile is inspected
+with the pinned `llvm-profdata show --all-functions` and must match exactly one
+expected component fingerprint. `libfrr`, `libmgmt_be_nb`, `bgpd`, `zebra`, and
+`ospfd` must all be present and are merged into five separate indexed profiles.
+A raw profile matching unselected `staticd`, `mgmtd`, `watchfrr`, or `vtysh`
+code is rejected as instrumentation leakage. Per-component outputs prevent
+identical external-name and CFG-hash records in different FRR binaries from
+being incorrectly combined.
+Each selected shard must execute its component sentinel before it can be
+sealed. The profile-set seal binds all six indexed profiles to the exact
+appliance, compiler, flags, runtime collector, component selection, and
+training inputs; stale or altered profiles fail closed. The final manifest
+records the compiler, optimization mode, profile-set key, the BIRD digest, and
+an ordered composite digest for the five FRR profiles. The sealed profile-set
+artifact retains each individual FRR digest. OCI publication accepts only
+`pgo.mode: "use"` bundles.
+
+The final verifier closes over Buildroot's package ownership inventory: every
+installed BIRD or FRR ELF must be in the pinned scope, selected ELFs must carry
+the correct mode marker, and unselected ELFs must carry no PGO residue. In use
+mode, every unstripped ELF records Clang's compile command: the only
+`-fprofile-use` token allowed in a selected ELF is its exact component path,
+and unselected ELFs must contain none.
 
 The script verifies every downloaded source, confirms the BIRD/FRR versions in
 the pinned Buildroot release, enables Buildroot reproducibility, and produces:

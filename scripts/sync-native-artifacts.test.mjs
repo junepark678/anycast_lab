@@ -145,7 +145,7 @@ describe('sync-native-artifacts deployment modes', () => {
     });
 
     const status = JSON.parse(await readFile(resolve(output, 'status.json'), 'utf8'));
-    expect(status).toMatchObject({ nativeV86: true, buildId: 'anycastlab-v86-br2026.02.3-r2' });
+    expect(status).toMatchObject({ nativeV86: true, buildId: 'anycastlab-v86-br2026.02.3-r3' });
     await expect(access(resolve(output, 'v86/router-bzimage.bin'))).resolves.toBeUndefined();
     await expect(access(resolve(output, 'v86/not-deployed.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
   });

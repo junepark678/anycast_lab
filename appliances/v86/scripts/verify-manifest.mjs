@@ -9,7 +9,7 @@ export const MAX_RELEASE_ARTIFACT_BYTES = 512 * 1024 * 1024;
 export const PINNED_V86_MANIFEST_IDENTITY = Object.freeze({
   schemaVersion: 1,
   imageId: 'anycast-lab-router',
-  buildId: 'anycastlab-v86-br2026.02.3-r2',
+  buildId: 'anycastlab-v86-br2026.02.3-r3',
   sourceDateEpoch: 1_781_643_617,
   buildroot: Object.freeze({
     version: '2026.02.3',

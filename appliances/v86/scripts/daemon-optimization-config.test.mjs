@@ -17,16 +17,88 @@ describe('Clang daemon optimization build contract', () => {
     expect(makefile).toContain('-Qunused-arguments');
     expect(makefile.match(/LD="\$\(ANYCAST_LLD\)"/g)).toHaveLength(2);
     expect(makefile.match(/CPP="\$\(ANYCAST_CC\) -E"/g)).toHaveLength(2);
-    expect(makefile).toContain('ANYCAST_BIRD_PGO_FLAGS = -fprofile-generate=/tmp/anycast-pgo -fprofile-update=atomic');
-    expect(makefile).toContain('ANYCAST_FRR_PGO_FLAGS = -fprofile-generate=/tmp/anycast-pgo -fprofile-update=atomic');
+    expect(makefile).toContain('ANYCAST_BIRD_PGO_CFLAGS = -fprofile-generate=/tmp/anycast-pgo -fprofile-update=atomic');
+    expect(makefile).toContain('ANYCAST_FRR_GENERATE_CFLAGS =');
     expect(makefile).toContain('-fprofile-use=$(ANYCAST_BIRD_PROFILE)');
-    expect(makefile).toContain('-fprofile-use=$(ANYCAST_FRR_PROFILE)');
+    for (const component of ['LIBFRR', 'LIBMGMT_BE_NB', 'BGPD', 'ZEBRA', 'OSPFD']) {
+      expect(makefile).toContain(`-fprofile-use=$(ANYCAST_FRR_${component}_PROFILE)`);
+      expect(makefile).toContain(`ANYCAST_FRR_${component}_PGO_CFLAGS=`);
+      expect(makefile).toContain(`ANYCAST_FRR_${component}_PGO_LDFLAGS=`);
+    }
     expect(makefile).toContain('-Werror=profile-instr-out-of-date');
+    expect(makefile).toContain('-Werror=backend-plugin');
+    expect(makefile.match(/-frecord-command-line/g)).toHaveLength(1);
+    expect(makefile).toContain('$(ANYCAST_PGO_RECORD_CFLAGS)');
+    expect(makefile).toContain('ANYCAST_PGO_RECORD_CFLAGS = -frecord-command-line');
     expect(makefile).not.toContain('-Werror=profile-instr-missing');
     expect(makefile.match(/BR2_USE_CCACHE=0/g)).toHaveLength(4);
-    expect(makefile).toContain('CFLAGS="$(ANYCAST_COMMON_CFLAGS) -D_GNU_SOURCE $(ANYCAST_BIRD_PGO_FLAGS)"');
-    expect(makefile).toContain('CFLAGS="$(ANYCAST_COMMON_CFLAGS) -DFRR_XREF_NO_NOTE $(ANYCAST_FRR_PGO_FLAGS)"');
+    expect(makefile).toContain('CFLAGS="$(ANYCAST_COMMON_CFLAGS) -D_GNU_SOURCE"');
+    expect(makefile).toContain('CFLAGS="$(ANYCAST_COMMON_CFLAGS) -DFRR_XREF_NO_NOTE"');
+    expect(makefile).not.toContain('CFLAGS="$(ANYCAST_COMMON_CFLAGS) -D_GNU_SOURCE $(');
+    expect(makefile).not.toContain('CFLAGS="$(ANYCAST_COMMON_CFLAGS) -DFRR_XREF_NO_NOTE $(');
     expect(makefile).toContain('$(BIRD_TARGET_CONFIGURE) $(FRR_TARGET_CONFIGURE): | anycast-clang-toolchain');
+  });
+
+  it('applies PGO only to trained BIRD and FRR build targets', async () => {
+    const birdPatch = await readFile(
+      resolve(root, 'buildroot/patches/bird/0001-scope-pgo-to-daemon.patch'),
+      'utf8',
+    );
+    const frrPatch = await readFile(
+      resolve(root, 'buildroot/patches/frr/0001-scope-pgo-to-trained-components.patch'),
+      'utf8',
+    );
+    const defconfig = await readFile(resolve(root, 'buildroot/configs/anycast_lab_v86_defconfig'), 'utf8');
+    expect(defconfig).toContain('$(BR2_EXTERNAL_ANYCAST_LAB_PATH)/patches');
+    expect(birdPatch).toContain('$(daemon): CFLAGS += $(ANYCAST_BIRD_PGO_CFLAGS)');
+    expect(birdPatch).toContain('$(daemon): LDFLAGS += $(ANYCAST_BIRD_PGO_LDFLAGS)');
+    expect(birdPatch).not.toContain('$(client): CFLAGS');
+    for (const target of [
+      'lib_libfrr_la',
+      'mgmtd_libmgmt_be_nb_la',
+      'bgpd_libbgp_a',
+      'bgpd_bgpd',
+      'zebra_zebra',
+      'ospfd_libfrrospf_a',
+      'ospfd_libfrrospfclient_a',
+      'ospfd_ospfd',
+    ]) {
+      expect(frrPatch).toContain(`${target}_CFLAGS`);
+    }
+    expect(frrPatch).toContain(
+      'bgpd_bgp_btoa_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_BGPD_PGO_LDFLAGS)',
+    );
+    expect(frrPatch).toContain(
+      'ospfclient_ospfclient_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_OSPFD_PGO_LDFLAGS)',
+    );
+    for (const test of [
+      'aspath',
+      'bgp_table',
+      'capability',
+      'ecommunity',
+      'mp_attr',
+      'packet',
+      'peer_attr',
+    ]) {
+      expect(frrPatch).toContain(
+        `tests_bgpd_test_${test}_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_BGPD_PGO_LDFLAGS)`,
+      );
+    }
+    expect(frrPatch).toContain(
+      'tests_ospfd_test_ospf_spf_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_OSPFD_PGO_LDFLAGS)',
+    );
+    expect(frrPatch).toContain(
+      'bgpd_bgpd_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_BGPD_PGO_LDFLAGS)',
+    );
+    expect(frrPatch).toContain(
+      'zebra_zebra_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_ZEBRA_PGO_LDFLAGS)',
+    );
+    expect(frrPatch).toContain(
+      'ospfd_ospfd_LDFLAGS = $(AM_LDFLAGS) $(ANYCAST_FRR_OSPFD_PGO_LDFLAGS)',
+    );
+    expect(frrPatch).not.toContain('staticd_staticd_CFLAGS');
+    expect(frrPatch).not.toContain('vtysh_vtysh_CFLAGS');
+    expect(frrPatch).toContain('!defined(ANYCAST_LLVM_IR_PGO)');
   });
 
   it('builds a pinned profile-only i386 runtime after the complete GCC/glibc staging toolchain', async () => {
@@ -105,10 +177,28 @@ describe('Clang daemon optimization build contract', () => {
     const build = await readFile(resolve(root, 'scripts/build-image.sh'), 'utf8');
     expect(build).toContain('PGO_MODE=${ANYCAST_PGO_MODE:-none}');
     expect(build).toContain('PGO_PROFILE_DIR=${ANYCAST_PGO_PROFILE_DIR:-}');
-    expect(build).toContain("node \"$ROOT/scripts/pgo-profile-set.mjs\" validate");
+    expect(build.match(/node "\$ROOT\/scripts\/pgo-profile-set\.mjs" validate/g)).toHaveLength(3);
+    expect(build).toContain('profile-set.json; do');
+    expect(build).toContain('"$PGO_PROFILE_DIR/training-evidence.json"');
+    expect(build).toContain('"$VALIDATED_PROFILE_DIR/training-evidence.json"');
+    expect(build).toContain('if [ "$SNAPSHOT_BUILD_KEY" != "$PGO_BUILD_KEY" ]; then');
+    expect(build).toContain('chmod 0444 "$VALIDATED_PROFILE_DIR"/*.profdata');
+    expect(build).toContain('chmod 0555 "$VALIDATED_PROFILE_DIR"');
+    expect(build).toContain('PGO_PROFILE_DIR="$VALIDATED_PROFILE_DIR"');
+    expect(build).toContain('if [ "$POST_BUILD_PROFILE_KEY" != "$PGO_BUILD_KEY" ]; then');
+    expect(build).toContain('pgo-profile-set.mjs" frr-digest');
     expect(build).toContain('buildroot_make bird-dirclean frr-dirclean');
     expect(build).toContain('anycast-clang-toolchain');
     expect(build).toContain('verify-optimized-daemons.sh');
+    for (const profile of [
+      'frr-libfrr.profdata',
+      'frr-libmgmt-be-nb.profdata',
+      'frr-bgpd.profdata',
+      'frr-zebra.profdata',
+      'frr-ospfd.profdata',
+    ]) {
+      expect(build).toContain(profile);
+    }
     expect(build).toContain('LLVM_JOBS');
     expect(build).toContain('BR2_JLEVEL="$LLVM_JOBS"');
     expect(build).toContain('BR2_JLEVEL="$JOBS"');

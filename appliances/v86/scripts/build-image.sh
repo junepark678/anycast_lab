@@ -16,7 +16,11 @@ PGO_WORK="$WORK/pgo"
 PGO_MODE=${ANYCAST_PGO_MODE:-none}
 PGO_PROFILE_DIR=${ANYCAST_PGO_PROFILE_DIR:-}
 BIRD_PROFILE=
-FRR_PROFILE=
+FRR_LIBFRR_PROFILE=
+FRR_LIBMGMT_BE_NB_PROFILE=
+FRR_BGPD_PROFILE=
+FRR_ZEBRA_PROFILE=
+FRR_OSPFD_PROFILE=
 
 mkdir -p "$DOWNLOADS" "$BUILDROOT_DOWNLOADS" "$DIST" "$PGO_WORK"
 
@@ -81,12 +85,40 @@ case "$PGO_MODE" in
     PGO_BUILD_KEY=$(node "$ROOT/scripts/pgo-profile-set.mjs" validate \
       --root "$ROOT" --profile-dir "$PGO_PROFILE_DIR")
     VALIDATED_PROFILE_DIR="$PGO_WORK/validated-$PGO_BUILD_KEY"
+    if [ -d "$VALIDATED_PROFILE_DIR" ]; then
+      chmod -R u+w "$VALIDATED_PROFILE_DIR"
+    fi
     rm -rf "$VALIDATED_PROFILE_DIR"
     install -d -m 0755 "$VALIDATED_PROFILE_DIR"
-    install -m 0644 "$PGO_PROFILE_DIR/bird.profdata" "$VALIDATED_PROFILE_DIR/bird.profdata"
-    install -m 0644 "$PGO_PROFILE_DIR/frr.profdata" "$VALIDATED_PROFILE_DIR/frr.profdata"
+    for profile_file in \
+      bird.profdata \
+      frr-libfrr.profdata \
+      frr-libmgmt-be-nb.profdata \
+      frr-bgpd.profdata \
+      frr-zebra.profdata \
+      frr-ospfd.profdata \
+      profile-set.json; do
+      install -m 0644 "$PGO_PROFILE_DIR/$profile_file" "$VALIDATED_PROFILE_DIR/$profile_file"
+    done
+    install -m 0600 \
+      "$PGO_PROFILE_DIR/training-evidence.json" \
+      "$VALIDATED_PROFILE_DIR/training-evidence.json"
+    SNAPSHOT_BUILD_KEY=$(node "$ROOT/scripts/pgo-profile-set.mjs" validate \
+      --root "$ROOT" --profile-dir "$VALIDATED_PROFILE_DIR")
+    if [ "$SNAPSHOT_BUILD_KEY" != "$PGO_BUILD_KEY" ]; then
+      echo 'PGO profile set changed while creating the validated build snapshot' >&2
+      exit 1
+    fi
+    chmod 0444 "$VALIDATED_PROFILE_DIR"/*.profdata "$VALIDATED_PROFILE_DIR/profile-set.json"
+    chmod 0400 "$VALIDATED_PROFILE_DIR/training-evidence.json"
+    chmod 0555 "$VALIDATED_PROFILE_DIR"
+    PGO_PROFILE_DIR="$VALIDATED_PROFILE_DIR"
     BIRD_PROFILE="$VALIDATED_PROFILE_DIR/bird.profdata"
-    FRR_PROFILE="$VALIDATED_PROFILE_DIR/frr.profdata"
+    FRR_LIBFRR_PROFILE="$VALIDATED_PROFILE_DIR/frr-libfrr.profdata"
+    FRR_LIBMGMT_BE_NB_PROFILE="$VALIDATED_PROFILE_DIR/frr-libmgmt-be-nb.profdata"
+    FRR_BGPD_PROFILE="$VALIDATED_PROFILE_DIR/frr-bgpd.profdata"
+    FRR_ZEBRA_PROFILE="$VALIDATED_PROFILE_DIR/frr-zebra.profdata"
+    FRR_OSPFD_PROFILE="$VALIDATED_PROFILE_DIR/frr-ospfd.profdata"
     ;;
   none|generate)
     PGO_BUILD_KEY=$(printf '%s\n%s\n' "$PGO_CONTEXT_SHA" "$PGO_MODE" | sha256sum | cut -d' ' -f1)
@@ -99,8 +131,6 @@ FRR_PROFILE_SHA256_JSON=null
 GUEST_MEMORY_BYTES=134217728
 if [ "$PGO_MODE" = use ]; then
   PGO_PROFILE_SET_BUILD_KEY_JSON=\"$PGO_BUILD_KEY\"
-  BIRD_PROFILE_SHA256_JSON=\"$(sha256sum "$BIRD_PROFILE" | cut -d' ' -f1)\"
-  FRR_PROFILE_SHA256_JSON=\"$(sha256sum "$FRR_PROFILE" | cut -d' ' -f1)\"
 elif [ "$PGO_MODE" = generate ]; then
   # LLVM instrumentation expands the compressed initramfs enough that the
   # kernel cannot unpack it in the release image's 128 MiB guest allocation.
@@ -112,7 +142,11 @@ buildroot_make() {
     BR2_DL_DIR="$BUILDROOT_DOWNLOADS" BR2_LOCALVERSION="$BUILDROOT_VERSION" \
     ANYCAST_PGO_MODE="$PGO_MODE" \
     ANYCAST_BIRD_PROFILE="$BIRD_PROFILE" \
-    ANYCAST_FRR_PROFILE="$FRR_PROFILE" \
+    ANYCAST_FRR_LIBFRR_PROFILE="$FRR_LIBFRR_PROFILE" \
+    ANYCAST_FRR_LIBMGMT_BE_NB_PROFILE="$FRR_LIBMGMT_BE_NB_PROFILE" \
+    ANYCAST_FRR_BGPD_PROFILE="$FRR_BGPD_PROFILE" \
+    ANYCAST_FRR_ZEBRA_PROFILE="$FRR_ZEBRA_PROFILE" \
+    ANYCAST_FRR_OSPFD_PROFILE="$FRR_OSPFD_PROFILE" \
     "$@"
 }
 
@@ -155,7 +189,13 @@ test "$PROFILE_RUNTIME" = "$CLANG_RUNTIME_DIR/libclang_rt.profile.a"
 test -s "$PROFILE_RUNTIME"
 
 if [ "$PGO_MODE" = use ]; then
-  for profile in "$BIRD_PROFILE" "$FRR_PROFILE"; do
+  for profile in \
+    "$BIRD_PROFILE" \
+    "$FRR_LIBFRR_PROFILE" \
+    "$FRR_LIBMGMT_BE_NB_PROFILE" \
+    "$FRR_BGPD_PROFILE" \
+    "$FRR_ZEBRA_PROFILE" \
+    "$FRR_OSPFD_PROFILE"; do
     if ! "$LLVM_PROFDATA" show "$profile" | grep -Eq 'Total functions: [1-9][0-9]*'; then
       printf 'PGO profile is not a non-empty LLVM %s indexed profile: %s\n' \
         "$LLVM_VERSION" "$profile" >&2
@@ -172,6 +212,19 @@ if [ "$PREVIOUS_OPTIMIZATION" != "$PGO_MODE:$PGO_BUILD_KEY" ]; then
 fi
 
 buildroot_make -j"$JOBS" BR2_JLEVEL="$JOBS"
+if [ "$PGO_MODE" = use ]; then
+  POST_BUILD_PROFILE_KEY=$(node "$ROOT/scripts/pgo-profile-set.mjs" validate \
+    --root "$ROOT" --profile-dir "$PGO_PROFILE_DIR")
+  if [ "$POST_BUILD_PROFILE_KEY" != "$PGO_BUILD_KEY" ]; then
+    echo 'Validated PGO profile snapshot changed during the optimized build' >&2
+    exit 1
+  fi
+  BIRD_PROFILE_SHA256_JSON=\"$(sha256sum "$BIRD_PROFILE" | cut -d' ' -f1)\"
+  # frrProfileSha256 commits to the named, ordered component-shard digests
+  # without incorporating machine-specific absolute profile paths.
+  FRR_PROFILE_SHA256_JSON=\"$(node "$ROOT/scripts/pgo-profile-set.mjs" frr-digest \
+    --root "$ROOT" --profile-dir "$PGO_PROFILE_DIR")\"
+fi
 buildroot_make ccache-stats
 
 # Guard the integration seams that Buildroot package/layout changes could
@@ -193,7 +246,7 @@ done
 
 "$ROOT/scripts/verify-optimized-daemons.sh" \
   "$OUTPUT" "$BIRD_VERSION" "$FRR_VERSION" "$LLVM_VERSION" "$PGO_MODE" \
-  "$BIRD_PROFILE" "$FRR_PROFILE"
+  "$PGO_PROFILE_DIR"
 
 printf '%s\n' "$PGO_MODE:$PGO_BUILD_KEY" >"$OPTIMIZATION_STAMP.tmp"
 mv "$OPTIMIZATION_STAMP.tmp" "$OPTIMIZATION_STAMP"

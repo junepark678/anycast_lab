@@ -1,0 +1,11 @@
+diff --git a/Makefile.in b/Makefile.in
+index 839efe2..393c077 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -75,0 +76,6 @@ cli: $(client)
++# The browser-lab workload trains the routing daemon, not its control clients.
++# Target-specific variables are inherited by the daemon's object prerequisites,
++# keeping birdc and birdcl on the common O3/ThinLTO build without foreign PGO.
++$(daemon): CFLAGS += $(ANYCAST_BIRD_PGO_CFLAGS)
++$(daemon): LDFLAGS += $(ANYCAST_BIRD_PGO_LDFLAGS)
++

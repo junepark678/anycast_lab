@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import { execFile as execFileCallback } from 'node:child_process';
@@ -27,6 +28,7 @@ const frrProgramBuildPaths = {
   isisd: 'isisd/isisd',
   ldpd: 'ldpd/ldpd',
   mgmtd: 'mgmtd/mgmtd',
+  mtracebis: 'pimd/mtracebis',
   ospf6d: 'ospf6d/ospf6d',
   ospfd: 'ospfd/ospfd',
   pathd: 'pathd/pathd',
@@ -44,6 +46,7 @@ const frrProgramBuildPaths = {
 };
 const frrLibraryBuildPaths = {
   'lib/libfrr.so.0.0.0': 'lib/.libs/libfrr.so.0.0.0',
+  'lib/libmgmt_be_nb.so.0.0.0': 'mgmtd/.libs/libmgmt_be_nb.so.0.0.0',
   'lib/frr/modules/dplane_fpm_nl.so': 'zebra/.libs/dplane_fpm_nl.so',
   'lib/frr/modules/pathd_pcep.so': 'pathd/.libs/pathd_pcep.so',
   'lib/frr/modules/zebra_cumulus_mlag.so': 'zebra/.libs/zebra_cumulus_mlag.so',
@@ -51,38 +54,68 @@ const frrLibraryBuildPaths = {
 };
 const frrElfPaths = [
   ...Object.keys(frrProgramBuildPaths)
-    .filter((program) => program !== 'vtysh')
-    .map((program) => `target/usr/sbin/${program}`),
-  'target/usr/bin/vtysh',
+    .map((program) => (
+      `target/usr/${['mtracebis', 'vtysh'].includes(program) ? 'bin' : 'sbin'}/${program}`
+    )),
   ...Object.keys(frrLibraryBuildPaths).map((library) => `target/usr/${library}`),
 ];
 const frrBuildElfPaths = [
   ...Object.values(frrProgramBuildPaths),
   ...Object.values(frrLibraryBuildPaths),
 ];
+const selectedElfPaths = new Set([
+  'target/usr/sbin/bird',
+  'target/usr/sbin/bgpd',
+  'target/usr/sbin/ospfd',
+  'target/usr/sbin/zebra',
+  'target/usr/lib/libfrr.so.0.0.0',
+  'target/usr/lib/libmgmt_be_nb.so.0.0.0',
+  'build/bird-2.15.1/bird',
+  'build/frr-10.5.1/bgpd/bgpd',
+  'build/frr-10.5.1/ospfd/ospfd',
+  'build/frr-10.5.1/zebra/zebra',
+  'build/frr-10.5.1/lib/.libs/libfrr.so.0.0.0',
+  'build/frr-10.5.1/mgmtd/.libs/libmgmt_be_nb.so.0.0.0',
+]);
+
+function selectedProfileFile(path) {
+  if (path.endsWith('/bird')) return 'bird.profdata';
+  if (path.endsWith('/bgpd')) return 'frr-bgpd.profdata';
+  if (path.endsWith('/ospfd')) return 'frr-ospfd.profdata';
+  if (path.endsWith('/zebra')) return 'frr-zebra.profdata';
+  if (path.endsWith('/libfrr.so.0.0.0')) return 'frr-libfrr.profdata';
+  if (path.endsWith('/libmgmt_be_nb.so.0.0.0')) return 'frr-libmgmt-be-nb.profdata';
+  throw new Error(`Missing selected test profile mapping for ${path}`);
+}
 
 async function optimizedFixture(mode) {
   const base = await mkdtemp(resolve(tmpdir(), 'anycast-optimized-daemons-'));
   temporaryDirectories.push(base);
   const output = resolve(base, 'output');
-  const birdProfile = resolve(base, 'profiles/bird.profdata');
-  const frrProfile = resolve(base, 'profiles/frr.profdata');
-  const profileFlags = mode === 'generate'
-    ? '-fprofile-generate=/tmp/anycast-pgo -fprofile-update=atomic'
-    : mode === 'use'
-      ? `-fprofile-use=PROFILE -Werror=profile-instr-out-of-date`
-      : '';
+  const profileDirectory = resolve(base, 'profiles');
+  await mkdir(profileDirectory, { recursive: true });
+  if (mode === 'use') {
+    for (const profile of [
+      'bird.profdata',
+      'frr-libfrr.profdata',
+      'frr-libmgmt-be-nb.profdata',
+      'frr-bgpd.profdata',
+      'frr-zebra.profdata',
+      'frr-ospfd.profdata',
+    ]) {
+      await writeFile(resolve(profileDirectory, profile), `${profile}\n`);
+    }
+  }
   for (const [name, version] of [
     ['bird', '2.15.1'],
     ['frr', '10.5.1'],
   ]) {
     const directory = resolve(output, `build/${name}-${version}`);
     await mkdir(directory, { recursive: true });
-    const flags = profileFlags.replace('PROFILE', name === 'bird' ? birdProfile : frrProfile);
     await writeFile(resolve(directory, 'config.log'), [
       `CC='${output}/host/bin/clang --target=i686-buildroot-linux-gnu --sysroot=${output}/host/i686-buildroot-linux-gnu/sysroot --gcc-install-dir=${output}/host/lib/gcc/i686-buildroot-linux-gnu/14.3.0 --ld-path=${output}/host/bin/ld.lld'`,
-      `CFLAGS='-march=pentiumpro -O3 -flto=thin ${flags}'`,
-      `LDFLAGS='-O3 -flto=thin -fuse-ld=lld ${flags}'`,
+      "CFLAGS='-march=pentiumpro -O3 -flto=thin'",
+      "LDFLAGS='-O3 -flto=thin -fuse-ld=lld'",
     ].join('\n'));
   }
   const files = [
@@ -98,12 +131,33 @@ async function optimizedFixture(mode) {
   for (const file of files) {
     const path = resolve(output, file);
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, 'elf');
+    const evidence = ['elf'];
+    if (selectedElfPaths.has(file)) {
+      evidence.push(`pgo-marker=${mode}`);
+      if (mode === 'generate') evidence.push('profile-sections', 'profile-runtime');
+      if (mode === 'use') {
+        evidence.push(`compile-profile=${resolve(profileDirectory, selectedProfileFile(file))}`);
+      }
+    }
+    await writeFile(path, `${evidence.join('\n')}\n`);
     await chmod(path, 0o755);
   }
   const frrServiceScript = resolve(output, 'target/usr/sbin/frr');
   await writeFile(frrServiceScript, '#!/bin/sh\n');
   await chmod(frrServiceScript, 0o755);
+  const packageFileList = [
+    'target/usr/sbin/bird',
+    'target/usr/sbin/birdc',
+    'target/usr/sbin/birdcl',
+  ].map((path) => `bird,./${path.slice('target/'.length)}`);
+  packageFileList.push(
+    ...frrElfPaths.map((path) => `frr,./${path.slice('target/'.length)}`),
+    'frr,./usr/sbin/frr',
+  );
+  await writeFile(
+    resolve(output, 'build/packages-file-list.txt'),
+    `${packageFileList.join('\n')}\n`,
+  );
   if (mode === 'generate') {
     const marker = resolve(output, 'target/etc/anycastlab/pgo-generate');
     await mkdir(dirname(marker), { recursive: true });
@@ -114,10 +168,10 @@ async function optimizedFixture(mode) {
   const readelf = resolve(tools, 'readelf');
   const nm = resolve(tools, 'llvm-nm');
   await writeFile(readelf, fakeReadelf());
-  await writeFile(nm, '#!/bin/sh\nif [ "${FAKE_PROFILE_RUNTIME:-0}" = 1 ]; then echo "0001 T __llvm_profile_runtime"; fi\n');
+  await writeFile(nm, '#!/bin/sh\nfor file do :; done\nif grep -Fxq profile-runtime "$file"; then echo "0001 T __llvm_profile_runtime"; fi\n');
   await chmod(readelf, 0o755);
   await chmod(nm, 0o755);
-  return { base, output, birdProfile, frrProfile, readelf, nm };
+  return { base, output, profileDirectory, readelf, nm };
 }
 
 async function runVerifier(fixture, mode, environment = {}) {
@@ -128,18 +182,26 @@ async function runVerifier(fixture, mode, environment = {}) {
     '10.5.1',
     '21.1.8',
     mode,
-    mode === 'use' ? fixture.birdProfile : '',
-    mode === 'use' ? fixture.frrProfile : '',
+    mode === 'use' ? fixture.profileDirectory : '',
   ], {
     env: {
       ...process.env,
       READELF: fixture.readelf,
       LLVM_NM: fixture.nm,
-      FAKE_PGO_MODE: mode,
-      FAKE_PROFILE_RUNTIME: mode === 'generate' ? '1' : '0',
       ...environment,
     },
   });
+}
+
+async function addEvidence(fixture, relativePath, evidence) {
+  const path = resolve(fixture.output, relativePath);
+  await writeFile(path, `${await readFile(path, 'utf8')}${evidence}\n`);
+}
+
+async function removeEvidence(fixture, relativePath, evidence) {
+  const path = resolve(fixture.output, relativePath);
+  const lines = (await readFile(path, 'utf8')).split('\n').filter((line) => line !== evidence);
+  await writeFile(path, lines.join('\n'));
 }
 
 afterEach(async () => {
@@ -163,6 +225,40 @@ describe('optimized daemon shell verifier', () => {
     await expect(runVerifier(fixture, 'none')).rejects.toMatchObject({ stderr: expect.stringContaining('-O3') });
   });
 
+  it.each(['generate', 'use'])('rejects package-wide %s flags that would profile unselected ELFs', async (mode) => {
+    const fixture = await optimizedFixture(mode);
+    const path = resolve(fixture.output, 'build/frr-10.5.1/config.log');
+    const flag = mode === 'generate'
+      ? '-fprofile-generate=/tmp/anycast-pgo'
+      : `-fprofile-use=${fixture.profileDirectory}/frr-bgpd.profdata`;
+    await writeFile(path, `${await readFile(path, 'utf8')}\nCFLAGS='${flag}'\n`);
+    await expect(runVerifier(fixture, mode)).rejects.toMatchObject({
+      stderr: expect.stringContaining('Unexpected optimization evidence'),
+    });
+
+    const birdFixture = await optimizedFixture(mode);
+    const birdConfig = resolve(birdFixture.output, 'build/bird-2.15.1/config.log');
+    await writeFile(birdConfig, `${await readFile(birdConfig, 'utf8')}\nCFLAGS='${flag}'\n`);
+    await expect(runVerifier(birdFixture, mode)).rejects.toMatchObject({
+      stderr: expect.stringContaining('Unexpected optimization evidence'),
+    });
+  }, 15_000);
+
+  it('requires all six regular, non-symlink use profiles', async () => {
+    const missing = await optimizedFixture('use');
+    await rm(resolve(missing.profileDirectory, 'frr-zebra.profdata'));
+    await expect(runVerifier(missing, 'use')).rejects.toMatchObject({
+      stderr: expect.stringContaining('regular, non-symlink profile'),
+    });
+
+    const linked = await optimizedFixture('use');
+    await rm(resolve(linked.profileDirectory, 'frr-zebra.profdata'));
+    await symlink('frr-bgpd.profdata', resolve(linked.profileDirectory, 'frr-zebra.profdata'));
+    await expect(runVerifier(linked, 'use')).rejects.toMatchObject({
+      stderr: expect.stringContaining('regular, non-symlink profile'),
+    });
+  });
+
   it('verifies independently linked FRR daemons beyond bgpd and zebra', async () => {
     const fixture = await optimizedFixture('use');
     await expect(runVerifier(fixture, 'use', { FAKE_BAD_FILE: 'ospfd' })).rejects.toBeTruthy();
@@ -172,7 +268,7 @@ describe('optimized daemon shell verifier', () => {
     const fixture = await optimizedFixture('use');
     await expect(runVerifier(fixture, 'use')).resolves.toBeTruthy();
     await expect(runVerifier(fixture, 'use', { FAKE_BAD_FILE: 'vtysh' })).rejects.toBeTruthy();
-  });
+  }, 15_000);
 
   it('requires and independently verifies every pinned FRR executable and shared ELF', async () => {
     const badModule = await optimizedFixture('use');
@@ -183,18 +279,148 @@ describe('optimized daemon shell verifier', () => {
     await expect(runVerifier(missing, 'use')).rejects.toMatchObject({
       stderr: expect.stringContaining('Missing expected FRR executable'),
     });
-  });
 
-  it('rejects missing generate runtime and runtime retained by a use build', async () => {
-    const generate = await optimizedFixture('generate');
-    await expect(runVerifier(generate, 'generate', { FAKE_PROFILE_RUNTIME: '0' })).rejects.toMatchObject({
+    const missingManagementLibrary = await optimizedFixture('use');
+    await rm(resolve(missingManagementLibrary.output, 'target/usr/lib/libmgmt_be_nb.so.0.0.0'));
+    await expect(runVerifier(missingManagementLibrary, 'use')).rejects.toMatchObject({
+      stderr: expect.stringContaining('Missing expected FRR shared ELF'),
+    });
+  }, 15_000);
+
+  it('rejects an unexpected package-owned BIRD or FRR ELF', async () => {
+    for (const packageName of ['bird', 'frr']) {
+      const fixture = await optimizedFixture('use');
+      const relative = `target/usr/lib/${packageName}-unexpected.so`;
+      const path = resolve(fixture.output, relative);
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, 'elf\n');
+      await chmod(path, 0o755);
+      await writeFile(
+        resolve(fixture.output, 'build/packages-file-list.txt'),
+        `${await readFile(resolve(fixture.output, 'build/packages-file-list.txt'), 'utf8')}` +
+          `${packageName},./${relative.slice('target/'.length)}\n`,
+      );
+      await expect(runVerifier(fixture, 'use')).rejects.toMatchObject({
+        stderr: expect.stringContaining(`Package-owned ELF inventory drifted for ${packageName}`),
+      });
+    }
+  }, 15_000);
+
+  it('requires generate marker, profile sections, and runtime on every selected kind', async () => {
+    const missingMarker = await optimizedFixture('generate');
+    await removeEvidence(missingMarker, 'target/usr/lib/libmgmt_be_nb.so.0.0.0', 'pgo-marker=generate');
+    await expect(runVerifier(missingMarker, 'generate')).rejects.toMatchObject({
+      stderr: expect.stringContaining('lacks mode marker'),
+    });
+
+    const missingSections = await optimizedFixture('generate');
+    await removeEvidence(missingSections, 'target/usr/sbin/ospfd', 'profile-sections');
+    await expect(runVerifier(missingSections, 'generate')).rejects.toMatchObject({
+      stderr: expect.stringContaining('lacks LLVM profile sections'),
+    });
+
+    const missingRuntime = await optimizedFixture('generate');
+    await removeEvidence(missingRuntime, 'build/frr-10.5.1/lib/.libs/libfrr.so.0.0.0', 'profile-runtime');
+    await expect(runVerifier(missingRuntime, 'generate')).rejects.toMatchObject({
       stderr: expect.stringContaining('lacks compiler-rt profile runtime'),
     });
-    const use = await optimizedFixture('use');
-    await expect(runVerifier(use, 'use', { FAKE_PROFILE_RUNTIME: '1' })).rejects.toMatchObject({
-      stderr: expect.stringContaining('unexpectedly retains profile runtime'),
+  }, 15_000);
+
+  it('forbids every kind of PGO evidence on unselected executables and plugins', async () => {
+    const marker = await optimizedFixture('generate');
+    await addEvidence(marker, 'target/usr/sbin/birdc', 'pgo-marker=generate');
+    await expect(runVerifier(marker, 'generate')).rejects.toMatchObject({
+      stderr: expect.stringContaining('PGO-unselected ELF unexpectedly carries an anycast PGO marker'),
+    });
+
+    const sections = await optimizedFixture('generate');
+    await addEvidence(sections, 'target/usr/sbin/ripd', 'profile-sections');
+    await expect(runVerifier(sections, 'generate')).rejects.toMatchObject({
+      stderr: expect.stringContaining('PGO-unselected ELF unexpectedly retains LLVM profile sections'),
+    });
+
+    const runtime = await optimizedFixture('generate');
+    await addEvidence(runtime, 'build/frr-10.5.1/zebra/.libs/zebra_fpm.so', 'profile-runtime');
+    await expect(runVerifier(runtime, 'generate')).rejects.toMatchObject({
+      stderr: expect.stringContaining('PGO-unselected ELF unexpectedly retains compiler-rt profile runtime'),
+    });
+  }, 15_000);
+
+  it.each(['none', 'use'])('forbids PGO markers on unselected ELFs in %s mode', async (mode) => {
+    const fixture = await optimizedFixture(mode);
+    await addEvidence(fixture, 'target/usr/bin/mtracebis', `pgo-marker=${mode}`);
+    await expect(runVerifier(fixture, mode)).rejects.toMatchObject({
+      stderr: expect.stringContaining('PGO-unselected ELF unexpectedly carries an anycast PGO marker'),
     });
   });
+
+  it('forbids profile-use compile flags on unselected use-mode ELFs', async () => {
+    const fixture = await optimizedFixture('use');
+    await addEvidence(
+      fixture,
+      'build/frr-10.5.1/ripd/ripd',
+      `compile-profile=${resolve(fixture.profileDirectory, 'frr-bgpd.profdata')}`,
+    );
+    await expect(runVerifier(fixture, 'use')).rejects.toMatchObject({
+      stderr: expect.stringContaining('PGO-unselected use ELF contains profile-use compile flags'),
+    });
+  });
+
+  it('requires use-mode selected ELFs to contain only the use marker', async () => {
+    const sections = await optimizedFixture('use');
+    await addEvidence(sections, 'build/frr-10.5.1/bgpd/bgpd', 'profile-sections');
+    await expect(runVerifier(sections, 'use')).rejects.toMatchObject({
+      stderr: expect.stringContaining('PGO-selected ELF unexpectedly retains LLVM profile sections'),
+    });
+
+    const runtime = await optimizedFixture('use');
+    await addEvidence(runtime, 'build/bird-2.15.1/bird', 'profile-runtime');
+    await expect(runVerifier(runtime, 'use')).rejects.toMatchObject({
+      stderr: expect.stringContaining('PGO-selected ELF unexpectedly retains compiler-rt profile runtime'),
+    });
+
+    const wrongMarker = await optimizedFixture('use');
+    await addEvidence(wrongMarker, 'target/usr/sbin/zebra', 'pgo-marker=generate');
+    await expect(runVerifier(wrongMarker, 'use')).rejects.toMatchObject({
+      stderr: expect.stringContaining('retains an unexpected anycast PGO mode marker'),
+    });
+
+    const markerOnly = await optimizedFixture('use');
+    await removeEvidence(
+      markerOnly,
+      'build/frr-10.5.1/ospfd/ospfd',
+      `compile-profile=${resolve(markerOnly.profileDirectory, 'frr-ospfd.profdata')}`,
+    );
+    await expect(runVerifier(markerOnly, 'use')).rejects.toMatchObject({
+      stderr: expect.stringContaining('invalid component profile set'),
+    });
+
+    const wrongSuffix = await optimizedFixture('use');
+    const ospfdProfile = resolve(wrongSuffix.profileDirectory, 'frr-ospfd.profdata');
+    await removeEvidence(
+      wrongSuffix,
+      'build/frr-10.5.1/ospfd/ospfd',
+      `compile-profile=${ospfdProfile}`,
+    );
+    await addEvidence(
+      wrongSuffix,
+      'build/frr-10.5.1/ospfd/ospfd',
+      `compile-profile=${ospfdProfile}.evil`,
+    );
+    await expect(runVerifier(wrongSuffix, 'use')).rejects.toMatchObject({
+      stderr: expect.stringContaining('invalid component profile set'),
+    });
+
+    const mixed = await optimizedFixture('use');
+    await addEvidence(
+      mixed,
+      'build/frr-10.5.1/ospfd/ospfd',
+      `compile-profile=${resolve(mixed.profileDirectory, 'frr-bgpd.profdata')}`,
+    );
+    await expect(runVerifier(mixed, 'use')).rejects.toMatchObject({
+      stderr: expect.stringContaining('invalid component profile set'),
+    });
+  }, 15_000);
 
   it('rejects host compiler-rt leakage and incorrect generate markers', async () => {
     const leaked = await optimizedFixture('use');
@@ -210,7 +436,7 @@ describe('optimized daemon shell verifier', () => {
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, 'unexpected\n');
     await expect(runVerifier(marker, 'none')).rejects.toBeTruthy();
-  });
+  }, 15_000);
 });
 
 describe('post-build PGO marker', () => {
@@ -271,22 +497,30 @@ case "$1" in
     echo '  Machine:                           Intel 80386'
     ;;
   -p)
-    if [ "\${FAKE_BAD_FILE:-}" = "\${file##*/}" ]; then
-      echo '  GCC: (GNU) 14.3.0'
-    else
-      echo '  Linker: LLD 21.1.8'
-      echo '  clang version 21.1.8'
-    fi
+    case "$2" in
+      .comment)
+        if [ "\${FAKE_BAD_FILE:-}" = "\${file##*/}" ]; then
+          echo '  GCC: (GNU) 14.3.0'
+        else
+          echo '  Linker: LLD 21.1.8'
+          echo '  clang version 21.1.8'
+        fi
+        ;;
+      .GCC.command.line)
+        sed -n 's/^compile-profile=/  -fprofile-use=/p' "$file"
+        ;;
+      *) exit 2 ;;
+    esac
     ;;
   --wide)
     case "$2" in
       --dyn-syms)
         echo '  __anycast_clang_21_1_8'
         echo '  __anycast_o3_thinlto'
-        echo "  __anycast_pgo_\${FAKE_PGO_MODE}"
+        sed -n 's/^pgo-marker=/  __anycast_pgo_/p' "$file"
         ;;
       --sections)
-        if [ "\${FAKE_PGO_MODE}" = generate ]; then echo '  [10] __llvm_prf_cnts PROGBITS'; fi
+        if grep -Fxq profile-sections "$file"; then echo '  [10] __llvm_prf_cnts PROGBITS'; fi
         ;;
       *) exit 2 ;;
     esac

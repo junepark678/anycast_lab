@@ -271,12 +271,20 @@ jobs:
 
       - name: Build the optimized native appliance
         if: steps.final_bundle_cache.outputs.cache-hit != 'true'
+        shell: bash
         env:
           ANYCAST_PGO_MODE: use
           ANYCAST_PGO_PROFILE_DIR: ${{ env.PGO_PROFILE_DIR }}
           JOBS: '2'
           LLVM_JOBS: '2'
-        run: ./appliances/v86/scripts/build-image.sh
+        run: |
+          set -euo pipefail
+          log=appliances/v86/.work/pgo-use-build.log
+          ./appliances/v86/scripts/build-image.sh 2>&1 | tee "$log"
+          if grep -Eiq 'hash mismatch|Wbackend-plugin|profile is cold' "$log"; then
+            echo 'Optimized build emitted a forbidden PGO backend diagnostic' >&2
+            exit 1
+          fi
 
       - name: Verify the optimized native bundle and profile provenance
         shell: bash
@@ -361,7 +369,11 @@ jobs:
           path: |
             appliances/v86/.work/pgo/profiles/profile-set.json
             appliances/v86/.work/pgo/profiles/bird.profdata
-            appliances/v86/.work/pgo/profiles/frr.profdata
+            appliances/v86/.work/pgo/profiles/frr-libfrr.profdata
+            appliances/v86/.work/pgo/profiles/frr-libmgmt-be-nb.profdata
+            appliances/v86/.work/pgo/profiles/frr-bgpd.profdata
+            appliances/v86/.work/pgo/profiles/frr-zebra.profdata
+            appliances/v86/.work/pgo/profiles/frr-ospfd.profdata
             appliances/v86/.work/pgo/profiles/training-evidence.json
           if-no-files-found: error
           compression-level: 0

@@ -17,11 +17,48 @@ import { promisify } from 'node:util';
 
 import { computeApplianceCacheKey } from './appliance-cache-key.mjs';
 
-export const PGO_CONTEXT_SCHEMA_VERSION = 1;
-export const PGO_PROFILE_SET_SCHEMA_VERSION = 2;
+export const PGO_CONTEXT_SCHEMA_VERSION = 2;
+export const PGO_PROFILE_SET_SCHEMA_VERSION = 3;
+export const PGO_FRR_PROFILE_COMPONENTS = Object.freeze({
+  selected: Object.freeze([
+    Object.freeze({
+      component: 'libfrr',
+      fingerprint: 'event_fetch',
+      profile: 'frr-libfrr.profdata',
+    }),
+    Object.freeze({
+      component: 'libmgmt-be-nb',
+      fingerprint: 'zebra_cli_init',
+      profile: 'frr-libmgmt-be-nb.profdata',
+    }),
+    Object.freeze({
+      component: 'bgpd',
+      fingerprint: 'bgp_process_packet',
+      profile: 'frr-bgpd.profdata',
+    }),
+    Object.freeze({
+      component: 'zebra',
+      fingerprint: 'rib_update',
+      profile: 'frr-zebra.profdata',
+    }),
+    Object.freeze({
+      component: 'ospfd',
+      fingerprint: 'ospf_read',
+      profile: 'frr-ospfd.profdata',
+    }),
+  ]),
+  forbidden: Object.freeze([
+    Object.freeze({ component: 'staticd', fingerprint: 'static_zebra_init' }),
+    Object.freeze({ component: 'mgmtd', fingerprint: 'mgmt_master_init' }),
+    Object.freeze({ component: 'watchfrr', fingerprint: 'watchfrr_vty_init' }),
+    Object.freeze({ component: 'vtysh', fingerprint: 'vtysh_init_cmd' }),
+  ]),
+});
 export const PGO_PROFILE_FILES = Object.freeze({
   bird: 'bird.profdata',
-  frr: 'frr.profdata',
+  ...Object.fromEntries(PGO_FRR_PROFILE_COMPONENTS.selected.map(({ component, profile }) => (
+    [component, profile]
+  ))),
 });
 export const PGO_PROFILE_SET_FILE = 'profile-set.json';
 export const PGO_TRAINING_EVIDENCE_FILE = 'training-evidence.json';
@@ -29,7 +66,9 @@ export const PGO_TRAINING_EVIDENCE_SCHEMA_VERSION = 1;
 export const PGO_TRAINING_WORKLOAD = 'bird-frr-bgp-ospfv2-route-churn-link-recovery-v1';
 export const PGO_PROFILE_COVERAGE_SENTINELS = Object.freeze({
   bird: Object.freeze(['io_loop']),
-  frr: Object.freeze(['bgp_process_packet', 'rib_update', 'ospf_read']),
+  ...Object.fromEntries(PGO_FRR_PROFILE_COMPONENTS.selected.map(({ component, fingerprint }) => (
+    [component, Object.freeze([fingerprint])]
+  ))),
 });
 export const MAX_PGO_PROFILE_BYTES = 64 * 1024 * 1024;
 export const MAX_PGO_ARCHIVE_BYTES = 65 * 1024 * 1024;
@@ -111,7 +150,7 @@ export async function createPgoContext(root) {
         '-fprofile-generate=/tmp/anycast-pgo',
         '-fprofile-update=atomic',
       ],
-      useFlag: '-fprofile-use=<package.profdata>',
+      useFlag: '-fprofile-use=<component.profdata>',
       rawProfileDirectory: '/tmp/anycast-pgo',
       rawProfilePattern: 'daemon-<kind>_%m_%p.profraw',
       continuous: false,
@@ -120,6 +159,12 @@ export async function createPgoContext(root) {
       maxRawProfileBytes: MAX_PGO_PROFILE_BYTES,
       maxRawArchiveBytes: MAX_PGO_ARCHIVE_BYTES,
       maxRawProfilesPerArchive: MAX_PGO_RAW_PROFILES,
+      profileSelection: {
+        classifier: 'llvm-profdata-show-all-functions-v1',
+        package: 'frr',
+        selected: PGO_FRR_PROFILE_COMPONENTS.selected,
+        forbidden: PGO_FRR_PROFILE_COMPONENTS.forbidden,
+      },
     },
   };
   return {
@@ -230,7 +275,9 @@ export async function validatePgoProfileSet(root, profileDirectory) {
     manifest,
     buildKey: profileBuildKey(manifest),
     birdProfile: resolve(absoluteDirectory, PGO_PROFILE_FILES.bird),
-    frrProfile: resolve(absoluteDirectory, PGO_PROFILE_FILES.frr),
+    componentProfiles: Object.fromEntries(Object.entries(PGO_PROFILE_FILES).map(([name, file]) => (
+      [name, resolve(absoluteDirectory, file)]
+    ))),
     trainingEvidence: resolve(absoluteDirectory, PGO_TRAINING_EVIDENCE_FILE),
     training,
   };
@@ -294,9 +341,9 @@ export async function mergePgoProfileArchives({
   await mkdir(absoluteProfileDirectory, { recursive: true });
   const temporary = await mkdtemp(resolve(absoluteProfileDirectory, '.merge-'));
   try {
-    const merged = {};
-    for (const name of Object.keys(PGO_PROFILE_FILES)) {
-      const packageDirectory = resolve(temporary, name);
+    const rawPathsByPackage = {};
+    for (const name of Object.keys(entriesByPackage)) {
+      const packageDirectory = resolve(temporary, `raw-${name}`);
       await mkdir(packageDirectory, { mode: 0o700 });
       const rawPaths = [];
       for (const entry of entriesByPackage[name]) {
@@ -305,7 +352,24 @@ export async function mergePgoProfileArchives({
         rawPaths.push(path);
       }
       rawPaths.sort();
-      const output = resolve(temporary, PGO_PROFILE_FILES[name]);
+      rawPathsByPackage[name] = rawPaths;
+    }
+
+    const classifiedFrr = await classifyFrrRawProfiles(
+      llvmProfdata,
+      rawPathsByPackage.frr,
+    );
+    const mergeTargets = [
+      { component: 'bird', rawPaths: rawPathsByPackage.bird },
+      ...PGO_FRR_PROFILE_COMPONENTS.selected.map(({ component }) => ({
+        component,
+        rawPaths: classifiedFrr.get(component),
+      })),
+    ];
+
+    const merged = {};
+    for (const { component, rawPaths } of mergeTargets) {
+      const output = resolve(temporary, PGO_PROFILE_FILES[component]);
       await execFile(
         llvmProfdata,
         ['merge', '--failure-mode=any', `--output=${output}`, ...rawPaths],
@@ -313,21 +377,21 @@ export async function mergePgoProfileArchives({
       );
       const shown = await execFile(llvmProfdata, ['show', output], { maxBuffer: 8 * 1024 * 1024 });
       if (!/Total functions: [1-9][0-9]*/.test(shown.stdout)) {
-        throw new Error(`Merged ${name} profile contains no functions`);
+        throw new Error(`Merged ${component} profile contains no functions`);
       }
       const covered = await execFile(
         llvmProfdata,
         ['show', '--covered', output],
         { maxBuffer: 8 * 1024 * 1024 },
       );
-      for (const sentinel of PGO_PROFILE_COVERAGE_SENTINELS[name]) {
-        assertCoveredProfileFunction(covered.stdout, name, sentinel);
+      for (const sentinel of PGO_PROFILE_COVERAGE_SENTINELS[component]) {
+        assertCoveredProfileFunction(covered.stdout, component, sentinel);
       }
       const outputMetadata = await lstat(output);
       if (!outputMetadata.isFile() || outputMetadata.size < 1 || outputMetadata.size > MAX_PGO_PROFILE_BYTES) {
-        throw new Error(`Merged ${name} profile has an invalid size`);
+        throw new Error(`Merged ${component} profile has an invalid size`);
       }
-      merged[name] = output;
+      merged[component] = output;
     }
     for (const [name, file] of Object.entries(PGO_PROFILE_FILES)) {
       await rename(merged[name], resolve(absoluteProfileDirectory, file));
@@ -347,10 +411,122 @@ export async function mergePgoProfileArchives({
   }
 }
 
+async function classifyFrrRawProfiles(llvmProfdata, rawPaths) {
+  const selected = PGO_FRR_PROFILE_COMPONENTS.selected;
+  const forbidden = PGO_FRR_PROFILE_COMPONENTS.forbidden;
+  const definitions = [...selected, ...forbidden];
+  const classified = new Map(selected.map(({ component }) => [component, []]));
+
+  for (const rawPath of rawPaths) {
+    const shown = await execFile(
+      llvmProfdata,
+      ['show', '--all-functions', rawPath],
+      { maxBuffer: 8 * 1024 * 1024 },
+    );
+    const records = parseLlvmProfileFunctionRecords(shown.stdout, rawPath);
+    const matches = [];
+    for (const definition of definitions) {
+      const fingerprints = records.filter(({ name }) => name === definition.fingerprint);
+      if (fingerprints.length > 1) {
+        throw new Error(
+          `FRR raw profile ${rawPath} contains duplicate ${definition.component} fingerprint ` +
+          definition.fingerprint,
+        );
+      }
+      if (fingerprints.length === 1) matches.push(definition);
+    }
+    if (matches.length !== 1) {
+      const reason = matches.length === 0
+        ? 'does not match any expected component'
+        : `matches multiple components: ${matches.map(({ component }) => component).join(', ')}`;
+      throw new Error(`FRR raw profile ${rawPath} ${reason}`);
+    }
+    const [match] = matches;
+    if (!classified.has(match.component)) {
+      throw new Error(
+        `FRR raw profile ${rawPath} contains unselected component ${match.component} ` +
+        `(${match.fingerprint}); PGO instrumentation leaked outside the selected scope`,
+      );
+    }
+    classified.get(match.component).push(rawPath);
+  }
+
+  for (const { component, fingerprint } of selected) {
+    if (classified.get(component).length === 0) {
+      throw new Error(`FRR raw profiles are missing expected component ${component} (${fingerprint})`);
+    }
+  }
+  for (const paths of classified.values()) paths.sort();
+  return classified;
+}
+
+export function parseLlvmProfileFunctionRecords(output, label = 'llvm-profdata output') {
+  if (typeof output !== 'string') throw new TypeError(`${label} must be text`);
+  const lines = output.split(/\r?\n/);
+  if (lines[0] !== 'Counters:') throw new Error(`${label} has an invalid all-functions header`);
+  const records = [];
+  const identities = new Set();
+  let totalFunctions = null;
+  for (let index = 1; index < lines.length; index += 1) {
+    const functionMatch = /^ {2}(.+):$/.exec(lines[index]);
+    if (functionMatch !== null) {
+      const hashMatch = /^ {4}Hash: (0x[0-9a-fA-F]+)$/.exec(lines[index + 1] ?? '');
+      if (hashMatch === null) {
+        throw new Error(`${label} has a function without a CFG hash: ${functionMatch[1]}`);
+      }
+      const record = { name: functionMatch[1], cfgHash: hashMatch[1].toLowerCase() };
+      const identity = JSON.stringify([record.name, record.cfgHash]);
+      if (identities.has(identity)) {
+        throw new Error(`${label} contains a duplicate name and CFG hash record: ${record.name}`);
+      }
+      identities.add(identity);
+      records.push(record);
+      index += 1;
+      continue;
+    }
+    const totalMatch = /^Total functions: ([0-9]+)$/.exec(lines[index]);
+    if (totalMatch !== null) {
+      if (totalFunctions !== null) throw new Error(`${label} has multiple total-function summaries`);
+      totalFunctions = Number.parseInt(totalMatch[1], 10);
+    }
+  }
+  if (records.length === 0) throw new Error(`${label} contains no function records`);
+  if (totalFunctions === null || totalFunctions !== records.length) {
+    throw new Error(`${label} function records do not match its total-function summary`);
+  }
+  return records;
+}
+
 export function assertCoveredProfileFunction(output, profileName, sentinel) {
   const lines = output.split(/\r?\n/);
   if (lines.some((line) => line.trim() === sentinel)) return;
   throw new Error(`Merged ${profileName} profile did not execute required function ${sentinel}`);
+}
+
+export function computeFrrProfileCompositeSha256(profiles) {
+  if (profiles === null || typeof profiles !== 'object' || Array.isArray(profiles)) {
+    throw new TypeError('FRR profile records must be an object');
+  }
+  const hash = createHash('sha256');
+  hash.update('anycast-lab-frr-profile-composite-v1\0');
+  for (const { component, profile } of PGO_FRR_PROFILE_COMPONENTS.selected) {
+    const record = profiles[component];
+    if (
+      record === null ||
+      typeof record !== 'object' ||
+      record.file !== profile ||
+      !/^[a-f0-9]{64}$/.test(record.sha256)
+    ) {
+      throw new Error(`Invalid sealed FRR profile record for ${component}`);
+    }
+    hash.update(component);
+    hash.update('\0');
+    hash.update(profile);
+    hash.update('\0');
+    hash.update(record.sha256);
+    hash.update('\0');
+  }
+  return hash.digest('hex');
 }
 
 export function parsePgoUstar(archive, label = 'PGO archive') {
@@ -773,6 +949,7 @@ async function inspectProfile(path, file) {
     throw new Error(`PGO profile exceeds ${MAX_PGO_PROFILE_BYTES} bytes: ${file}`);
   }
   const bytes = await readFile(path);
+  if (bytes.byteLength !== metadata.size) throw new Error(`PGO profile changed while it was being read: ${file}`);
   return {
     file,
     bytes: bytes.byteLength,
@@ -864,6 +1041,11 @@ async function main(arguments_) {
     process.stdout.write(`${result.buildKey}\n`);
     return;
   }
+  if (command === 'frr-digest') {
+    const result = await validatePgoProfileSet(root, profileDirectory);
+    process.stdout.write(`${computeFrrProfileCompositeSha256(result.manifest.profiles)}\n`);
+    return;
+  }
   if (command === 'merge') {
     const result = await mergePgoProfileArchives({
       root,
@@ -878,7 +1060,7 @@ async function main(arguments_) {
     return;
   }
   throw new Error(
-    'Usage: pgo-profile-set.mjs context|validate|merge --root PATH ' +
+    'Usage: pgo-profile-set.mjs context|validate|frr-digest|merge --root PATH ' +
     '[--output FILE|--profile-dir DIR --build-output DIR --bird-archive FILE --frr-archive FILE ' +
     '--evidence FILE --manifest FILE]',
   );

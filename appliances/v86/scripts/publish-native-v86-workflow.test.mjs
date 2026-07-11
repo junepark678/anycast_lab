@@ -38,6 +38,9 @@ describe('native v86 PGO publication workflow', () => {
     const optimized = step('Build the optimized native appliance');
     expect(optimized).toContain('ANYCAST_PGO_MODE: use');
     expect(optimized).toContain('ANYCAST_PGO_PROFILE_DIR: ${{ env.PGO_PROFILE_DIR }}');
+    expect(optimized).toContain('set -euo pipefail');
+    expect(optimized).toContain('./appliances/v86/scripts/build-image.sh 2>&1 | tee "$log"');
+    expect(optimized).toContain("grep -Eiq 'hash mismatch|Wbackend-plugin|profile is cold'");
     expect(step('Verify the optimized native bundle and profile provenance'))
       .toContain('manifest.pgo.profileSetBuildKey !== process.env.EXPECTED_PROFILE_BUILD_KEY');
   });
@@ -120,7 +123,15 @@ describe('native v86 PGO publication workflow', () => {
     const profileArtifact = step('Upload the validated PGO profile set');
     expect(profileArtifact).toContain('appliances/v86/.work/pgo/profiles/profile-set.json');
     expect(profileArtifact).toContain('appliances/v86/.work/pgo/profiles/bird.profdata');
-    expect(profileArtifact).toContain('appliances/v86/.work/pgo/profiles/frr.profdata');
+    for (const profile of [
+      'frr-libfrr.profdata',
+      'frr-libmgmt-be-nb.profdata',
+      'frr-bgpd.profdata',
+      'frr-zebra.profdata',
+      'frr-ospfd.profdata',
+    ]) {
+      expect(profileArtifact).toContain(`appliances/v86/.work/pgo/profiles/${profile}`);
+    }
     expect(profileArtifact).toContain('appliances/v86/.work/pgo/profiles/training-evidence.json');
     expect(profileArtifact).not.toContain('appliances/v86/.work/pgo/raw/training-evidence.json');
     expect(profileArtifact).toContain('retention-days: 30');
