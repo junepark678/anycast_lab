@@ -145,6 +145,8 @@ jobs:
             appliances/v86/.work/downloads
             appliances/v86/.work/buildroot-downloads
           key: native-v86-downloads-${{ hashFiles('appliances/v86/versions.env', 'appliances/v86/buildroot/**') }}
+          restore-keys: |
+            native-v86-downloads-
 
       - name: Restore the Buildroot compiler cache
         if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && steps.native_bundle_cache.outputs.cache-hit != 'true'
