@@ -52,6 +52,7 @@ function options(overrides = {}) {
     manifestSha256Path: digestPath,
     manifestUrl: `https://assets.example/releases/${digest}/manifest.json`,
     channel: 'stable',
+    generation: 7,
     sourceRevision: 'a'.repeat(40),
     publishedAt: '2026-07-11T00:00:00.000Z',
     ...overrides,
@@ -64,6 +65,7 @@ it('creates and validates an external release status from immutable inputs', asy
     schemaVersion: 1,
     nativeV86: true,
     channel: 'stable',
+    generation: 7,
     manifestUrl: `https://assets.example/releases/${digest}/manifest.json`,
     manifestSha256: digest,
     buildId: 'anycastlab-v86-br2026.02.3-r1',
@@ -109,6 +111,9 @@ it('rejects noncanonical timestamps and source revisions', async () => {
   await expect(
     createReleaseStatus(options({ sourceRevision: 'main' })),
   ).rejects.toThrow(/40-character Git commit SHA/);
+  await expect(
+    createReleaseStatus(options({ generation: -1 })),
+  ).rejects.toThrow(/non-negative safe integer/);
 });
 
 it('the fixture digest file is exact and has no hidden test mutation', async () => {

@@ -11,6 +11,7 @@ const RELEASE_STATUS_KEYS = new Set([
   'schemaVersion',
   'nativeV86',
   'channel',
+  'generation',
   'manifestUrl',
   'manifestSha256',
   'buildId',
@@ -27,6 +28,7 @@ export async function createReleaseStatus(options) {
   const { manifest, manifestSha256 } = verified;
 
   assertChannel(options.channel);
+  assertGeneration(options.generation);
   assertManifestUrl(options.manifestUrl, manifestSha256);
   assertSourceRevision(options.sourceRevision);
   const publishedAt = options.publishedAt ?? new Date().toISOString();
@@ -36,6 +38,7 @@ export async function createReleaseStatus(options) {
     schemaVersion: 1,
     nativeV86: true,
     channel: options.channel,
+    generation: options.generation,
     manifestUrl: options.manifestUrl,
     manifestSha256,
     buildId: manifest.buildId,
@@ -54,6 +57,7 @@ export async function validateReleaseStatus(status, options = {}) {
   if (status.schemaVersion !== 1) throw new Error('Unsupported release status schema');
   if (status.nativeV86 !== true) throw new Error('Release status must enable nativeV86');
   assertChannel(status.channel);
+  assertGeneration(status.generation);
   assertSha256('manifestSha256', status.manifestSha256);
   assertManifestUrl(status.manifestUrl, status.manifestSha256);
   if (typeof status.buildId !== 'string' || status.buildId.length === 0) {
@@ -71,6 +75,7 @@ export async function validateReleaseStatus(status, options = {}) {
       manifestSha256Path: options.manifestSha256Path,
       manifestUrl: options.manifestUrl ?? status.manifestUrl,
       channel: options.channel ?? status.channel,
+      generation: options.generation ?? status.generation,
       sourceRevision: options.sourceRevision ?? status.sourceRevision,
       publishedAt: options.publishedAt ?? status.publishedAt,
     });
@@ -112,6 +117,12 @@ function assertManifestUrl(value, digest) {
 function assertChannel(value) {
   if (typeof value !== 'string' || !CHANNEL_PATTERN.test(value)) {
     throw new Error('channel must contain only lowercase letters, digits, dots, underscores, and hyphens');
+  }
+}
+
+function assertGeneration(value) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error('generation must be a non-negative safe integer');
   }
 }
 
@@ -168,6 +179,7 @@ async function main(argv) {
       manifestSha256Path: required(values, '--manifest-sha256'),
       manifestUrl: required(values, '--manifest-url'),
       channel: required(values, '--channel'),
+      generation: Number(required(values, '--generation')),
       sourceRevision: required(values, '--source-revision'),
       publishedAt: values.get('--published-at'),
     });
@@ -182,6 +194,7 @@ async function main(argv) {
       manifestSha256Path: values.get('--manifest-sha256'),
       manifestUrl: values.get('--manifest-url'),
       channel: values.get('--channel'),
+      generation: values.has('--generation') ? Number(values.get('--generation')) : undefined,
       sourceRevision: values.get('--source-revision'),
       publishedAt: values.get('--published-at'),
     });

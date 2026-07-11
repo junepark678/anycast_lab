@@ -50,10 +50,10 @@ still valid and publishes an explicit `nativeV86: false` runtime status.
 
 The hosted guide does not compile Buildroot in its site build environment.
 The native release workflow builds and verifies the appliance separately,
-publishes digest-addressed artifacts to R2, and advances a small channel status
+publishes digest-addressed artifacts to OCI Object Storage, and advances a small channel status
 document only after every object is available. The guide build publishes a
 same-origin pointer to that status. See the appliance README for its Actions
-configuration and R2 CORS contract.
+configuration and OCI public-read contract.
 
 ## Verification
 

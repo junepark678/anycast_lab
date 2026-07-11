@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: Mutable R2 release channel to advance after verification
+        description: Mutable OCI release channel to advance after verification
         required: true
         default: stable
         type: string
@@ -25,53 +25,57 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Validate R2 credentials and release coordinates
+      - name: Validate OCI release coordinates
         shell: bash
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
-          R2_PREFIX: ${{ vars.R2_PREFIX || 'anycast-lab/native-v86' }}
-          R2_CORS_ORIGIN: ${{ vars.R2_CORS_ORIGIN || 'https://anycast.guide' }}
+          OCI_PUBLIC_BASE_URL: ${{ vars.OCI_PUBLIC_BASE_URL }}
+          OCI_OBJECT_PREFIX: ${{ vars.OCI_OBJECT_PREFIX || 'anycast-lab/native-v86' }}
+          OCI_CORS_ORIGIN: ${{ vars.OCI_CORS_ORIGIN || 'https://anycast.guide' }}
+          OCI_PAR_EXPIRES_AT: ${{ vars.OCI_PAR_EXPIRES_AT }}
           RELEASE_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'stable' }}
         run: |
           set -euo pipefail
-          for variable in \
-            AWS_ACCESS_KEY_ID \
-            AWS_SECRET_ACCESS_KEY \
-            R2_ACCOUNT_ID \
-            R2_BUCKET \
-            R2_PUBLIC_BASE_URL; do
+          for variable in OCI_PUBLIC_BASE_URL OCI_PAR_EXPIRES_AT; do
             if [[ -z ${!variable:-} ]]; then
-              echo "Required R2 publish configuration is missing: $variable" >&2
+              echo "Required OCI publish configuration is missing: $variable" >&2
               exit 1
             fi
           done
-          if [[ ! $R2_PUBLIC_BASE_URL =~ ^https://[^/?#]+/?$ ]]; then
-            echo 'R2_PUBLIC_BASE_URL must be an HTTPS origin' >&2
+          if [[ ! $OCI_PUBLIC_BASE_URL =~ ^https://[^/?#@]+/n/[A-Za-z0-9._-]+/b/[A-Za-z0-9._-]+/o/?$ ]]; then
+            echo 'OCI_PUBLIC_BASE_URL must be an HTTPS native Object Storage object URL' >&2
             exit 1
           fi
-          if [[ ! $R2_CORS_ORIGIN =~ ^https://[^/?#]+$ ]]; then
-            echo 'R2_CORS_ORIGIN must be an HTTPS origin without a path' >&2
+          if [[ ! $OCI_CORS_ORIGIN =~ ^https://[^/?#]+$ ]]; then
+            echo 'OCI_CORS_ORIGIN must be an HTTPS origin without a path' >&2
             exit 1
           fi
           if [[ ! $RELEASE_CHANNEL =~ ^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$ ]]; then
             echo 'Invalid release channel' >&2
             exit 1
           fi
-          if [[ ! $R2_PREFIX =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]]; then
-            echo 'Invalid R2 object prefix' >&2
+          if [[ ! $OCI_OBJECT_PREFIX =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]]; then
+            echo 'Invalid OCI object prefix' >&2
             exit 1
           fi
-          IFS='/' read -r -a segments <<< "$R2_PREFIX"
+          IFS='/' read -r -a segments <<< "$OCI_OBJECT_PREFIX"
           for segment in "${segments[@]}"; do
             if [[ $segment == '.' || $segment == '..' ]]; then
-              echo 'Invalid R2 object prefix' >&2
+              echo 'Invalid OCI object prefix' >&2
               exit 1
             fi
           done
+          if [[ ! $OCI_PAR_EXPIRES_AT =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?Z$ ]]; then
+            echo 'OCI_PAR_EXPIRES_AT must be a UTC ISO-8601 timestamp' >&2
+            exit 1
+          fi
+          expires_epoch=$(date --date="$OCI_PAR_EXPIRES_AT" +%s) || {
+            echo 'OCI_PAR_EXPIRES_AT must be a real UTC ISO-8601 timestamp' >&2
+            exit 1
+          }
+          if (( expires_epoch <= $(date +%s) + 30 * 24 * 60 * 60 )); then
+            echo 'OCI publishing PAR expires in 30 days or less; rotate it before publishing' >&2
+            exit 1
+          fi
 
   build_test:
     name: Build and test
@@ -185,17 +189,15 @@ jobs:
           retention-days: 30
 
   publish:
-    name: Publish to R2
+    name: Publish to OCI Object Storage
     needs: build_test
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    environment: native-v86-publish
     env:
-      AWS_DEFAULT_REGION: auto
-      R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-      R2_BUCKET: ${{ vars.R2_BUCKET }}
-      R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
-      R2_PREFIX: ${{ vars.R2_PREFIX || 'anycast-lab/native-v86' }}
-      R2_CORS_ORIGIN: ${{ vars.R2_CORS_ORIGIN || 'https://anycast.guide' }}
+      OCI_PUBLIC_BASE_URL: ${{ vars.OCI_PUBLIC_BASE_URL }}
+      OCI_OBJECT_PREFIX: ${{ vars.OCI_OBJECT_PREFIX || 'anycast-lab/native-v86' }}
+      OCI_CORS_ORIGIN: ${{ vars.OCI_CORS_ORIGIN || 'https://anycast.guide' }}
       RELEASE_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'stable' }}
       SOURCE_REVISION: ${{ github.sha }}
 
@@ -211,10 +213,10 @@ jobs:
           name: native-v86-${{ needs.build_test.outputs.manifest_digest }}
           path: appliances/v86/dist
 
-      - name: Install the R2 client
+      - name: Install HTTP publishing dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends awscli curl
+          sudo apt-get install --yes --no-install-recommends curl
 
       - name: Prepare the immutable release status
         id: release
@@ -231,7 +233,7 @@ jobs:
             echo 'Downloaded bundle digest does not match the build job output' >&2
             exit 1
           fi
-          manifest_url="${R2_PUBLIC_BASE_URL%/}/$R2_PREFIX/objects/sha256/$digest/manifest.json"
+          manifest_url="${OCI_PUBLIC_BASE_URL%/}/$OCI_OBJECT_PREFIX/objects/sha256/$digest/manifest.json"
           status_path="$RUNNER_TEMP/native-v86-release-status.json"
           published_at=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
           node appliances/v86/scripts/release-status.mjs create \
@@ -239,15 +241,15 @@ jobs:
             --manifest-sha256 appliances/v86/dist/manifest.sha256 \
             --manifest-url "$manifest_url" \
             --channel "$RELEASE_CHANNEL" \
+            --generation "${{ github.run_number }}" \
             --source-revision "$SOURCE_REVISION" \
             --published-at "$published_at" \
             --output "$status_path"
           node appliances/v86/scripts/release-status.mjs validate --status "$status_path"
           echo "status_path=$status_path" >> "$GITHUB_OUTPUT"
 
-      - name: Publish immutable objects and advance the R2 channel
+      - name: Publish immutable objects and advance the OCI channel
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          OCI_PAR_BASE_URL: ${{ secrets.OCI_PAR_BASE_URL }}
           RELEASE_STATUS_PATH: ${{ steps.release.outputs.status_path }}
-        run: appliances/v86/scripts/publish-r2.sh
+        run: appliances/v86/scripts/publish-oci.sh

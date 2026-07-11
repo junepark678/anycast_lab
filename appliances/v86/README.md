@@ -59,62 +59,87 @@ Assets. The build enforces a 512 MiB per-file browser-safety ceiling to catch
 accidental oversized outputs; it does not constrain normal image growth to a
 site-hosting asset limit.
 
-## R2 release publishing
+## OCI Object Storage release publishing
 
 `.github/workflows/publish-native-v86.yml` builds the image on Ubuntu, runs the
 full verification gate with the real native VM test required, and uploads the
 verified bundle as a GitHub Actions artifact. It then publishes each file under
-the immutable R2 key
+the digest-addressed OCI Object Storage key
 `anycast-lab/native-v86/objects/sha256/<manifest-digest>/` and writes
 `channels/<channel>/status.json` last. Tag pushes matching `v86-*` advance the
 `stable` channel; a manual run can select another channel.
 
 Configure these repository Actions values:
 
-- secrets `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`, using an R2 API token
-  scoped to write only the artifact bucket;
-- variables `R2_ACCOUNT_ID`, `R2_BUCKET`, and `R2_PUBLIC_BASE_URL` (the HTTPS
-  custom domain or public bucket origin); and
-- optionally `R2_PREFIX` to replace `anycast-lab/native-v86` and
-  `R2_CORS_ORIGIN` to replace the production smoke-test origin
+- environment secret `OCI_PAR_BASE_URL` in the protected
+  `native-v86-publish` environment, containing the HTTPS base URL of an
+  `AnyObjectReadWrite` pre-authenticated request restricted to the
+  `anycast-lab/native-v86/` object-name prefix;
+- variable `OCI_PUBLIC_BASE_URL`, containing the public native Object Storage
+  URL through `/o`, before the object key;
+- variable `OCI_PAR_EXPIRES_AT`, containing the PAR's ISO-8601 expiration; and
+- optionally `OCI_OBJECT_PREFIX` to replace `anycast-lab/native-v86` and
+  `OCI_CORS_ORIGIN` to replace the production smoke-test origin
   `https://anycast.guide`.
 
-Publishing fails if any required value is absent. Existing digest-addressed
-objects are downloaded and compared before reuse, and different bytes are
-never allowed to replace them. The channel status contains the absolute
-manifest URL, manifest digest, build ID, VM memory size, source revision, and
-publication time. Before advancing that channel, the publisher fetches the
-manifest through the public URL, compares its bytes, and confirms that the
-configured guide origin receives an `Access-Control-Allow-Origin` response.
+The bucket must use Standard storage and `ObjectReadWithoutList` public access.
+Keep this bucket dedicated to public release artifacts because that access mode
+applies to every object in it. Configure `native-v86-publish` with a required
+reviewer; the secret is then unavailable to tag-controlled code until a human
+approves the exact release job.
 
-Set the guide's Cloudflare Pages build variable to the resulting channel URL:
+Create the publishing credential with listing denied and the exact trailing
+slash in the prefix:
+
+```sh
+oci os preauth-request create \
+  --bucket-name anycast_lab \
+  --name anycast-lab-native-v86-github-actions \
+  --access-type AnyObjectReadWrite \
+  --object-name 'anycast-lab/native-v86/' \
+  --bucket-listing-action Deny \
+  --time-expires '<ISO-8601 expiry>'
+```
+
+The prefix-scoped PAR is a publishing credential: store its URL only as a
+GitHub Actions secret, give it an explicit expiry, and rotate it before that
+date. OCI does not include the prefix in a prefix-scoped PAR URL, so keep
+`OCI_OBJECT_PREFIX` equal to the prefix used when the PAR was created.
+Record the PAR ID, name, creator, and expiry outside the repository. Rotation
+is create replacement, update the environment secret and expiry variable, run
+and approve a successful publish, then delete the old PAR; OCI does not show
+the URL again and PARs cannot be edited.
+
+Publishing fails if any required value is absent. Existing digest-addressed
+objects are downloaded and compared before reuse, and this publisher refuses
+to replace them with different bytes. The channel status contains the absolute
+manifest URL, manifest digest, build ID, VM memory size, source revision,
+workflow generation, and publication time. A generation guard prevents an
+older queued workflow from moving a channel backward. Before advancing that
+channel, the publisher fetches the manifest through the public URL, compares
+its bytes, and confirms its JSON content type and CORS response.
+
+The guide repository tracks its production stable-channel URL. Another
+deployment can override it with this build variable:
 
 ```text
-ANYCAST_LAB_NATIVE_STATUS_URL=https://<asset-domain>/<R2_PREFIX>/channels/stable/status.json
+ANYCAST_LAB_NATIVE_STATUS_URL=<OCI_PUBLIC_BASE_URL>/<OCI_OBJECT_PREFIX>/channels/stable/status.json
 ```
 
 The normal guide build is external-only: it packages this small pointer and
-never copies a cached local image into Workers Static Assets. If the variable
-is absent, the build still succeeds but reports NATIVE VM as unavailable.
+never copies a cached local image into Workers Static Assets.
 
-The public R2 origin must allow cross-origin `GET` and `HEAD` from the guide.
-For the production guide, the bucket CORS policy can be limited to:
+OCI's native Object Storage endpoint supplies wildcard CORS for anonymous
+`GET`, `HEAD`, and `OPTIONS`; there is no bucket CORS rule to maintain. The
+publisher verifies the actual response before advancing a channel. Browser
+requests remain credential-free, and the published manifest and every binary
+are verified before v86 starts.
 
-```json
-[
-  {
-    "AllowedOrigins": ["https://anycast.guide"],
-    "AllowedMethods": ["GET", "HEAD"],
-    "AllowedHeaders": ["Range"],
-    "ExposeHeaders": ["Content-Length", "Content-Range", "ETag"],
-    "MaxAgeSeconds": 86400
-  }
-]
-```
-
-Add explicit localhost origins only when testing the external bundle from a
-local development server. The published manifest and every binary are still
-verified in the browser before v86 starts.
+OCI bucket versioning is recommended for recovery from an accidental channel
+overwrite; the PAR itself cannot delete objects. Each digest bundle is about
+20 MiB, so periodically remove only digests that are no longer referenced by a
+channel or retained for rollback. Do not use a blind age rule that could delete
+the currently live digest.
 
 ## Runtime dependency
 

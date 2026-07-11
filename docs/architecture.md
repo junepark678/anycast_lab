@@ -51,7 +51,7 @@ disk and no route to the public Internet.
 
 The build emits a manifest, its digest, the Linux `bzImage`, v86 WASM, SeaBIOS,
 and VGA BIOS. A dedicated release workflow publishes these under immutable,
-digest-addressed R2 keys, then advances a channel status document as its final
+digest-addressed OCI Object Storage keys, then advances a channel status document as its final
 write. The guide packages only a same-origin pointer to that external status.
 The browser verifies the manifest and each artifact before constructing a VM.
 
