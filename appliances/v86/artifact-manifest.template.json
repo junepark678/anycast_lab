@@ -31,7 +31,7 @@
     "frrProfileSha256": @FRR_PROFILE_SHA256_JSON@
   },
   "machine": {
-    "memoryBytes": 134217728,
+    "memoryBytes": @GUEST_MEMORY_BYTES@,
     "vgaMemoryBytes": 2097152,
     "trunkMtu": 65535
   },

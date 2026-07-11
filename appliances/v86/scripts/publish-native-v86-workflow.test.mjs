@@ -72,10 +72,15 @@ describe('native v86 PGO publication workflow', () => {
     const trainingCcache = step('Restore the Buildroot compiler cache for training');
     expect(trainingCcache).toContain(trustedWrite);
     expect(trainingCcache).toContain("steps.pgo_profile_cache.outputs.cache-hit != 'true'");
+    expect(trainingCcache).toContain('native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-');
     const optimizedCcache = step('Restore the Buildroot compiler cache for the optimized build');
     expect(optimizedCcache).toContain(trustedWrite);
     expect(optimizedCcache).toContain("steps.pgo_profile_cache.outputs.cache-hit == 'true'");
     expect(optimizedCcache).toContain("steps.final_bundle_cache.outputs.cache-hit != 'true'");
+    expect(optimizedCcache).toContain('native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-');
+    expect(workflow.split(
+      '            native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-\n',
+    )).toHaveLength(3);
     expect(step('Save the verified Buildroot compiler cache')).toContain(trustedWrite);
     expect(step('Save the verified final native bundle')).toContain(trustedWrite);
     expect(step('Restore pinned source downloads')).not.toContain('refs/heads/master');

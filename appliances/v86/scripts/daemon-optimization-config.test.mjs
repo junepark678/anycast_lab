@@ -78,6 +78,29 @@ describe('Clang daemon optimization build contract', () => {
     }
   });
 
+  it('discards interactive client profiles only in instrumented guest shells', async () => {
+    const shell = await readFile(resolve(
+      root,
+      'buildroot/board/rootfs-overlay/usr/libexec/anycastlab-shell',
+    ), 'utf8');
+    expect(shell).toContain([
+      'if [ -f /etc/anycastlab/pgo-generate ]; then',
+      '  export LLVM_PROFILE_FILE=/dev/null',
+      'fi',
+      'exec /bin/sh',
+    ].join('\n'));
+    expect(shell.match(/export LLVM_PROFILE_FILE=\/dev\/null/g)).toHaveLength(1);
+  });
+
+  it('allows instrumented daemons to stop and flush profiles under v86', async () => {
+    const agent = await readFile(resolve(
+      root,
+      'buildroot/board/rootfs-overlay/usr/libexec/anycastlab-agent',
+    ), 'utf8');
+    expect(agent).toContain('PGO_STOP_ATTEMPTS=${ANYCASTLAB_PGO_STOP_ATTEMPTS:-600}');
+    expect(agent).toContain('sleep 0.25');
+  });
+
   it('exposes fail-closed shell modes, profile validation, tool provenance, and manifest provenance', async () => {
     const build = await readFile(resolve(root, 'scripts/build-image.sh'), 'utf8');
     expect(build).toContain('PGO_MODE=${ANYCAST_PGO_MODE:-none}');
@@ -89,12 +112,17 @@ describe('Clang daemon optimization build contract', () => {
     expect(build).toContain('LLVM_JOBS');
     expect(build).toContain('BR2_JLEVEL="$LLVM_JOBS"');
     expect(build).toContain('BR2_JLEVEL="$JOBS"');
+    expect(build).toContain('GUEST_MEMORY_BYTES=134217728');
+    expect(build).toContain('elif [ "$PGO_MODE" = generate ]; then');
+    expect(build).toContain('GUEST_MEMORY_BYTES=268435456');
+    expect(build).toContain('s/@GUEST_MEMORY_BYTES@/$GUEST_MEMORY_BYTES/g');
     expect(build).toContain('--print-runtime-dir');
     expect(build).toContain('--print-file-name=libclang_rt.profile.a');
     const manifest = await readFile(resolve(root, 'artifact-manifest.template.json'), 'utf8');
     expect(manifest).toContain('"scope": "bird-and-frr"');
     expect(manifest).toContain('"compilerVersion": "@LLVM_VERSION@"');
     expect(manifest).toContain('"profileSetBuildKey": @PGO_PROFILE_SET_BUILD_KEY_JSON@');
+    expect(manifest).toContain('"memoryBytes": @GUEST_MEMORY_BYTES@');
     expect(manifest).toContain('"birdProfileSha256": @BIRD_PROFILE_SHA256_JSON@');
     expect(manifest).toContain('"frrProfileSha256": @FRR_PROFILE_SHA256_JSON@');
   });

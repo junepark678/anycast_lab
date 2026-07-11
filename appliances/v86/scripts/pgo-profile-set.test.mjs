@@ -25,6 +25,7 @@ import {
   PGO_TRAINING_EVIDENCE_FILE,
   PGO_TRAINING_WORKLOAD,
   PGO_TRAINING_INPUTS,
+  assertCoveredProfileFunction,
   createPgoContext,
   mergePgoProfileArchives,
   parsePgoUstar,
@@ -244,6 +245,19 @@ describe('untrusted PGO ustar parsing', () => {
 });
 
 describe('archive merge command', () => {
+  it('requires an exact function from llvm-profdata covered output', () => {
+    expect(() => assertCoveredProfileFunction(
+      'io_loop\n',
+      'bird',
+      'io_loop',
+    )).not.toThrow();
+    expect(() => assertCoveredProfileFunction(
+      'other_io_loop\n',
+      'bird',
+      'io_loop',
+    )).toThrow(/did not execute/);
+  });
+
   it('uses the exact built LLVM 21 tool, failure-mode any, deterministic inputs, then seals', async () => {
     const { base, root, profiles } = await fixture();
     const buildOutput = resolve(base, 'output');
@@ -296,8 +310,30 @@ describe('archive merge command', () => {
       const inputs = arguments_.filter((argument) => argument.endsWith('.profraw'));
       expect(inputs).toEqual([...inputs].sort());
     }
+    const coverageCalls = invocations.filter((arguments_) =>
+      arguments_[0] === 'show' && arguments_.includes('--covered'));
+    expect(coverageCalls).toHaveLength(2);
+    expect(coverageCalls.every((arguments_) =>
+      arguments_.every((argument) => !argument.startsWith('--function=')))).toBe(true);
     await writeFile(resolve(profiles, PGO_TRAINING_EVIDENCE_FILE), '{"tampered":true}\n');
     await expect(validatePgoProfileSet(root, profiles)).rejects.toThrow(/training-evidence|unexpected fields/);
+  });
+
+  it('rejects profiles that did not execute every required daemon', async () => {
+    const harness = await mergeHarness();
+    const tool = resolve(harness.buildOutput, 'host/bin/llvm-profdata');
+    await writeFile(tool, fakeLlvmProfdata(resolve(harness.base, 'missing-coverage.log'), 'ospf_read'));
+    await chmod(tool, 0o755);
+    await expect(mergePgoProfileArchives({
+      root: harness.root,
+      profileDirectory: harness.profiles,
+      buildOutput: harness.buildOutput,
+      birdArchive: harness.birdArchive,
+      frrArchive: harness.frrArchive,
+      evidence: harness.training.evidencePath,
+      manifest: harness.training.manifestPath,
+    })).rejects.toThrow(/did not execute required function ospf_read/);
+    await expect(readFile(resolve(harness.profiles, PGO_PROFILE_SET_FILE))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('rejects an archive whose daemon tag does not match its package', async () => {
@@ -615,7 +651,7 @@ function writeOctal(target, offset, length, value) {
   writeAscii(target, offset, length - 1, value.toString(8).padStart(length - 1, '0'));
 }
 
-function fakeLlvmProfdata(log) {
+function fakeLlvmProfdata(log, missingSentinel = null) {
   return `#!/usr/bin/env node
 const { appendFile, readFile, writeFile } = require('node:fs/promises');
 const args = process.argv.slice(2);
@@ -631,7 +667,15 @@ if (args[0] === '--version') {
     const chunks = await Promise.all(inputs.map((path) => readFile(path)));
     await writeFile(output, Buffer.concat([Buffer.from('indexed:'), ...chunks]));
   } else if (args[0] === 'show') {
-    process.stdout.write('Instrumentation level: IR\\nTotal functions: 2\\n');
+    if (!args.includes('--covered')) {
+      process.stdout.write('Instrumentation level: IR\\nTotal functions: 2\\n');
+    } else {
+      const output = args.at(-1);
+      const sentinels = output.endsWith('/bird.profdata')
+        ? ['io_loop']
+        : ['bgp_process_packet', 'rib_update', 'ospf_read'];
+      process.stdout.write(sentinels.filter((sentinel) => sentinel !== ${JSON.stringify(missingSentinel)}).join('\\n') + '\\n');
+    }
   } else {
     process.exitCode = 2;
   }

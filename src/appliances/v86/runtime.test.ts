@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   APPLIANCE_HOST_ABI_VERSION,
   type ApplianceBootRequest,
@@ -71,8 +71,9 @@ describe('V86ApplianceRuntime', () => {
       readUstarArchive(fake.files.get('/anycastlab-bootstrap.tar')!)
         .find((file) => file.path === '/run/anycastlab/start.sh')!.contents,
     );
-    expect(startScript).toContain('/usr/sbin/birdc show status');
+    expect(startScript).toContain('[ -S /var/run/bird.ctl ] && LLVM_PROFILE_FILE=/dev/null /usr/sbin/birdc show status');
     expect(startScript).toContain('kill -0 "$appliance_pid"');
+    expect(startScript).toContain('[ "$attempt" -lt 480 ]');
     expect(startScript).toContain('appliance readiness probe timed out');
     expect(startScript).toContain('if [ -f /etc/anycastlab/pgo-generate ]; then');
     expect(startScript).toContain('[ ! -L /tmp/anycast-pgo ]');
@@ -188,6 +189,54 @@ describe('V86ApplianceRuntime', () => {
     await started;
     expect(runtime.state).toBe('running');
     await runtime.dispose();
+  });
+
+  it('extends only the instrumented guest boot deadline for PGO training', async () => {
+    vi.useFakeTimers();
+    try {
+      const instrumentedGuest = new FakeV86();
+      instrumentedGuest.startupControlLine = '';
+      const instrumentedRuntime = new V86ApplianceRuntime('bird', {
+        artifactSource: { manifestUrl: '/manifest.json', manifestSha256: 'a'.repeat(64) },
+        loadArtifacts: async () => artifactBundle('generate'),
+        emulatorFactory: instrumentedGuest.factory,
+        createObjectUrl: () => 'blob:v86-pgo-timeout',
+        revokeObjectUrl: () => undefined,
+        bootTimeoutMs: 5,
+      });
+      await instrumentedRuntime.initialize(bootRequest(), hostStub());
+      let instrumentedSettled = false;
+      const instrumentedStart = instrumentedRuntime.start().then(
+        () => null,
+        (error: unknown) => error,
+      ).finally(() => { instrumentedSettled = true; });
+      await vi.advanceTimersByTimeAsync(5);
+      expect(instrumentedSettled).toBe(false);
+      await vi.advanceTimersByTimeAsync(299_995);
+      await expect(instrumentedStart).resolves.toEqual(expect.objectContaining({
+        message: expect.stringMatching(/did not pass its guest readiness probe/),
+      }));
+      await instrumentedRuntime.dispose();
+
+      const releaseGuest = new FakeV86();
+      releaseGuest.startupControlLine = '';
+      const releaseRuntime = new V86ApplianceRuntime('bird', {
+        artifactSource: { manifestUrl: '/manifest.json', manifestSha256: 'a'.repeat(64) },
+        loadArtifacts: async () => artifactBundle('use'),
+        emulatorFactory: releaseGuest.factory,
+        createObjectUrl: () => 'blob:v86-release-timeout',
+        revokeObjectUrl: () => undefined,
+        bootTimeoutMs: 5,
+      });
+      await releaseRuntime.initialize(bootRequest(), hostStub());
+      const releaseStart = releaseRuntime.start();
+      const releaseAssertion = expect(releaseStart).rejects.toThrow(/did not pass its guest readiness probe/);
+      await vi.advanceTimersByTimeAsync(5);
+      await releaseAssertion;
+      await releaseRuntime.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('rejects guest startup failures and reports a later appliance exit', async () => {
@@ -567,7 +616,7 @@ function bootRequest(): ApplianceBootRequest {
   };
 }
 
-function artifactBundle(): VerifiedV86ArtifactBundle {
+function artifactBundle(pgoMode: 'generate' | 'use' = 'use'): VerifiedV86ArtifactBundle {
   return {
     manifestSha256: 'a'.repeat(64),
     manifest: {
@@ -589,7 +638,13 @@ function artifactBundle(): VerifiedV86ArtifactBundle {
         optimization: 'O3',
         lto: 'thin',
       },
-      pgo: {
+      pgo: pgoMode === 'generate' ? {
+        mode: 'generate',
+        contextSha256: '4'.repeat(64),
+        profileSetBuildKey: null,
+        birdProfileSha256: null,
+        frrProfileSha256: null,
+      } : {
         mode: 'use',
         contextSha256: '4'.repeat(64),
         profileSetBuildKey: '5'.repeat(64),

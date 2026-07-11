@@ -40,6 +40,9 @@ const OUTPUT_ARCHIVE_PATH = '/anycastlab-out.tar';
 const CONTROL_PROTOCOL = 'ANYCASTLAB/1';
 const LAB_VLAN_BASE = 100;
 const MAX_SERIAL_BACKLOG = 64 * 1024;
+const PGO_GENERATE_GUEST_BOOT_TIMEOUT_MS = 300_000;
+const PGO_COLLECTION_TIMEOUT_MS = 300_000;
+const GUEST_READINESS_ATTEMPTS = 480;
 const MAX_PGO_RAW_PROFILE_BYTES = 64 * 1024 * 1024;
 const MAX_PGO_PROFILE_ARCHIVE_BYTES = MAX_PGO_RAW_PROFILE_BYTES + 1024 * 1024;
 const MAX_PGO_PROFILE_ENTRIES = 128;
@@ -304,17 +307,21 @@ export class V86ApplianceRuntime implements ApplianceRuntime {
   async start(): Promise<void> {
     this.#expectState('initialized', 'stopped');
     const emulator = this.#requireEmulator();
+    const configuredBootTimeoutMs = this.#dependencies.bootTimeoutMs ?? 120_000;
+    const guestBootTimeoutMs = this.#requireArtifacts().manifest.pgo.mode === 'generate'
+      ? Math.max(configuredBootTimeoutMs, PGO_GENERATE_GUEST_BOOT_TIMEOUT_MS)
+      : configuredBootTimeoutMs;
     try {
       this.#transition('running');
       await emulator.run();
       await withTimeout(
         this.#guestReady.promise,
-        this.#dependencies.bootTimeoutMs ?? 120_000,
+        guestBootTimeoutMs,
         `${this.descriptor.displayName} did not pass its guest readiness probe`,
       );
       await withTimeout(
         this.#serialShellReady.promise,
-        this.#dependencies.bootTimeoutMs ?? 120_000,
+        guestBootTimeoutMs,
         `${this.descriptor.displayName} did not reach its serial shell`,
       );
       if (this.#state !== 'running') {
@@ -435,7 +442,7 @@ export class V86ApplianceRuntime implements ApplianceRuntime {
         await this.#sendControl(
           'COLLECT_PGO',
           [],
-          this.#dependencies.pgoCollectionTimeoutMs ?? 60_000,
+          this.#dependencies.pgoCollectionTimeoutMs ?? PGO_COLLECTION_TIMEOUT_MS,
         );
         const archive = await this.#requireEmulator().read_file(OUTPUT_ARCHIVE_PATH);
         const files = await validatePgoProfileArchive(archive, daemonKind);
@@ -888,7 +895,7 @@ function createGuestStartScript(
   }
   const command = [boot.entrypoint, ...boot.argv].map(shellQuote).join(' ');
   const readiness = kind === 'bird'
-    ? "/usr/sbin/birdc show status >/dev/null 2>&1"
+    ? "[ -S /var/run/bird.ctl ] && LLVM_PROFILE_FILE=/dev/null /usr/sbin/birdc show status >/dev/null 2>&1"
     : kind === 'frr'
       ? "[ -f /run/anycastlab/frr.ready ] && /usr/sbin/frrinit.sh status >/dev/null 2>&1"
       : 'true';
@@ -900,7 +907,7 @@ function createGuestStartScript(
     'sleep 0.1',
     "ready=0",
     "attempt=0",
-    'while kill -0 "$appliance_pid" 2>/dev/null && [ "$attempt" -lt 120 ]; do',
+    `while kill -0 "$appliance_pid" 2>/dev/null && [ "$attempt" -lt ${GUEST_READINESS_ATTEMPTS} ]; do`,
     `  if ${readiness}; then ready=1; break; fi`,
     '  attempt=$((attempt + 1))',
     '  sleep 0.25',

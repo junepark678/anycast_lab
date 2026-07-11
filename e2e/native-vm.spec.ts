@@ -17,7 +17,7 @@ interface PgoNativeIdentity {
 
 test('boots real BIRD and FRR VMs, establishes BGP and OSPF, and forwards over the browser fabric', async ({ page }, testInfo) => {
   const collectPgo = process.env.ANYCAST_LAB_COLLECT_PGO === '1';
-  test.setTimeout(collectPgo ? 600_000 : 360_000);
+  test.setTimeout(collectPgo ? 900_000 : 360_000);
   await page.goto('./');
   const nativeStatus = await page.evaluate(async () => {
     try {
@@ -189,7 +189,9 @@ ospfd_options="-A 127.0.0.1"
   await expect(page.getByRole('button', { name: 'Working…' })).toBeDisabled();
   await expect(page.getByTitle('Import project')).toBeDisabled();
   await expect(page.getByRole('button', { name: 'FRRouting' })).toBeDisabled();
-  await expect(page.getByText(/Native fabric is running · 2 real appliances/)).toBeVisible({ timeout: 180_000 });
+  await expect(page.getByText(/Native fabric is running · 2 real appliances/)).toBeVisible({
+    timeout: collectPgo ? 360_000 : 180_000,
+  });
 
   await page.getByTestId('rf__node-bird-native').click();
   const command = page.getByRole('textbox', { name: 'Terminal command' });

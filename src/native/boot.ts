@@ -64,7 +64,7 @@ trap cleanup EXIT
 trap 'exit 0' INT TERM
 ready=0
 attempt=0
-while [ "$attempt" -lt 120 ]; do
+while [ "$attempt" -lt 480 ]; do
   if /usr/sbin/frrinit.sh status >/dev/null 2>&1; then ready=1; break; fi
   attempt=$((attempt + 1))
   sleep 0.25

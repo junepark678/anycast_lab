@@ -170,6 +170,7 @@ jobs:
           key: native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-${{ github.run_id }}
           restore-keys: |
             native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-
+            native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install Bun
         uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
@@ -266,6 +267,7 @@ jobs:
           key: native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-${{ github.run_id }}
           restore-keys: |
             native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-
+            native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Build the optimized native appliance
         if: steps.final_bundle_cache.outputs.cache-hit != 'true'

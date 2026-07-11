@@ -27,6 +27,10 @@ export const PGO_PROFILE_SET_FILE = 'profile-set.json';
 export const PGO_TRAINING_EVIDENCE_FILE = 'training-evidence.json';
 export const PGO_TRAINING_EVIDENCE_SCHEMA_VERSION = 1;
 export const PGO_TRAINING_WORKLOAD = 'bird-frr-bgp-ospfv2-route-churn-link-recovery-v1';
+export const PGO_PROFILE_COVERAGE_SENTINELS = Object.freeze({
+  bird: Object.freeze(['io_loop']),
+  frr: Object.freeze(['bgp_process_packet', 'rib_update', 'ospf_read']),
+});
 export const MAX_PGO_PROFILE_BYTES = 64 * 1024 * 1024;
 export const MAX_PGO_ARCHIVE_BYTES = 65 * 1024 * 1024;
 export const MAX_PGO_RAW_PROFILES = 128;
@@ -311,6 +315,14 @@ export async function mergePgoProfileArchives({
       if (!/Total functions: [1-9][0-9]*/.test(shown.stdout)) {
         throw new Error(`Merged ${name} profile contains no functions`);
       }
+      const covered = await execFile(
+        llvmProfdata,
+        ['show', '--covered', output],
+        { maxBuffer: 8 * 1024 * 1024 },
+      );
+      for (const sentinel of PGO_PROFILE_COVERAGE_SENTINELS[name]) {
+        assertCoveredProfileFunction(covered.stdout, name, sentinel);
+      }
       const outputMetadata = await lstat(output);
       if (!outputMetadata.isFile() || outputMetadata.size < 1 || outputMetadata.size > MAX_PGO_PROFILE_BYTES) {
         throw new Error(`Merged ${name} profile has an invalid size`);
@@ -333,6 +345,12 @@ export async function mergePgoProfileArchives({
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
+}
+
+export function assertCoveredProfileFunction(output, profileName, sentinel) {
+  const lines = output.split(/\r?\n/);
+  if (lines.some((line) => line.trim() === sentinel)) return;
+  throw new Error(`Merged ${profileName} profile did not execute required function ${sentinel}`);
 }
 
 export function parsePgoUstar(archive, label = 'PGO archive') {
