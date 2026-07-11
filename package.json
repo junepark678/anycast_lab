@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "node scripts/sync-native-artifacts.mjs && tsc -b && vite build",
+    "build:required": "ANYCAST_LAB_NATIVE_MODE=local ANYCAST_LAB_REQUIRE_NATIVE=1 bun run build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -16,7 +17,7 @@
     "lint": "eslint .",
     "check": "tsc -b --pretty false",
     "verify": "bun run check && bun run lint && bun run test && bun run test:bird-abi && bun run build && bun run test:e2e",
-    "verify:native": "bun run build:v86-image && bun run build && ANYCAST_LAB_REQUIRE_NATIVE=1 playwright test e2e/native-vm.spec.ts",
+    "verify:native": "bun run build:v86-image && bun run build:required && ANYCAST_LAB_REQUIRE_NATIVE=1 playwright test e2e/native-vm.spec.ts",
     "verify:full": "bun run verify && bun run verify:native"
   },
   "dependencies": {

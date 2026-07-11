@@ -8,11 +8,12 @@ WORK=${WORK_DIR:-"$ROOT/.work"}
 DIST=${DIST_DIR:-"$ROOT/dist"}
 JOBS=${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '2')}
 DOWNLOADS="$WORK/downloads"
+BUILDROOT_DOWNLOADS=${BUILDROOT_DL_DIR:-"$WORK/buildroot-downloads"}
 BUILDROOT="$WORK/buildroot-$BUILDROOT_VERSION"
 OUTPUT="$WORK/output"
 V86_PACKAGE="$WORK/v86-package"
 
-mkdir -p "$DOWNLOADS" "$DIST"
+mkdir -p "$DOWNLOADS" "$BUILDROOT_DOWNLOADS" "$DIST"
 
 fetch() {
   destination=$1
@@ -37,8 +38,12 @@ grep -q "^BIRD_VERSION = $BIRD_VERSION\$" "$BUILDROOT/package/bird/bird.mk"
 grep -q "^FRR_VERSION = $FRR_VERSION\$" "$BUILDROOT/package/frr/frr.mk"
 
 export SOURCE_DATE_EPOCH
-make -C "$BUILDROOT" O="$OUTPUT" BR2_EXTERNAL="$ROOT/buildroot" anycast_lab_v86_defconfig
-make -C "$BUILDROOT" O="$OUTPUT" BR2_EXTERNAL="$ROOT/buildroot" -j"$JOBS"
+make -C "$BUILDROOT" O="$OUTPUT" BR2_EXTERNAL="$ROOT/buildroot" \
+  BR2_DL_DIR="$BUILDROOT_DOWNLOADS" BR2_LOCALVERSION="$BUILDROOT_VERSION" \
+  anycast_lab_v86_defconfig
+make -C "$BUILDROOT" O="$OUTPUT" BR2_EXTERNAL="$ROOT/buildroot" \
+  BR2_DL_DIR="$BUILDROOT_DOWNLOADS" BR2_LOCALVERSION="$BUILDROOT_VERSION" \
+  -j"$JOBS"
 
 # Guard the integration seams that Buildroot package/layout changes could
 # otherwise turn into silent no-ops in post-build.sh.
@@ -81,14 +86,13 @@ SEABIOS_OUTPUT_SHA256=$(sha256sum "$DIST/seabios.bin" | cut -d' ' -f1)
 VGABIOS_OUTPUT_SHA256=$(sha256sum "$DIST/vgabios.bin" | cut -d' ' -f1)
 BZIMAGE_SHA256=$(sha256sum "$DIST/router-bzimage.bin" | cut -d' ' -f1)
 
-# anycast.guide deploys through Cloudflare Workers Static Assets, whose
-# per-file limit is 25 MiB. Fail at the artifact source instead of producing a
-# manifest that the guide cannot deploy. Alternate deployments may lower this
-# limit, but should not raise it without moving/splitting the artifact.
-MAX_DEPLOY_ARTIFACT_BYTES=${MAX_DEPLOY_ARTIFACT_BYTES:-26214400}
+# Native images are published to dedicated object storage rather than Workers
+# Static Assets. Keep a generous browser-safety ceiling to catch accidental
+# multi-gigabyte outputs while allowing the appliance to grow past 25 MiB.
+MAX_RELEASE_ARTIFACT_BYTES=${MAX_RELEASE_ARTIFACT_BYTES:-536870912}
 for artifact_size in "$V86_WASM_SIZE" "$SEABIOS_SIZE" "$VGABIOS_SIZE" "$BZIMAGE_SIZE"; do
-  if [ "$artifact_size" -gt "$MAX_DEPLOY_ARTIFACT_BYTES" ]; then
-    printf 'Native artifact is %s bytes; deployment limit is %s bytes\n' "$artifact_size" "$MAX_DEPLOY_ARTIFACT_BYTES" >&2
+  if [ "$artifact_size" -gt "$MAX_RELEASE_ARTIFACT_BYTES" ]; then
+    printf 'Native artifact is %s bytes; release safety limit is %s bytes\n' "$artifact_size" "$MAX_RELEASE_ARTIFACT_BYTES" >&2
     exit 1
   fi
 done

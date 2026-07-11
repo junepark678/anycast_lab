@@ -1,0 +1,253 @@
+name: Build and publish native v86 appliance
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Mutable R2 release channel to advance after verification
+        required: true
+        default: stable
+        type: string
+  push:
+    tags:
+      - 'v86-*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-v86-${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'stable' }}
+  cancel-in-progress: false
+
+jobs:
+  validate_config:
+    name: Validate publish configuration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Validate R2 credentials and release coordinates
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+          R2_PREFIX: ${{ vars.R2_PREFIX || 'anycast-lab/native-v86' }}
+          R2_CORS_ORIGIN: ${{ vars.R2_CORS_ORIGIN || 'https://anycast.guide' }}
+          RELEASE_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'stable' }}
+        run: |
+          set -euo pipefail
+          for variable in \
+            AWS_ACCESS_KEY_ID \
+            AWS_SECRET_ACCESS_KEY \
+            R2_ACCOUNT_ID \
+            R2_BUCKET \
+            R2_PUBLIC_BASE_URL; do
+            if [[ -z ${!variable:-} ]]; then
+              echo "Required R2 publish configuration is missing: $variable" >&2
+              exit 1
+            fi
+          done
+          if [[ ! $R2_PUBLIC_BASE_URL =~ ^https://[^/?#]+/?$ ]]; then
+            echo 'R2_PUBLIC_BASE_URL must be an HTTPS origin' >&2
+            exit 1
+          fi
+          if [[ ! $R2_CORS_ORIGIN =~ ^https://[^/?#]+$ ]]; then
+            echo 'R2_CORS_ORIGIN must be an HTTPS origin without a path' >&2
+            exit 1
+          fi
+          if [[ ! $RELEASE_CHANNEL =~ ^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$ ]]; then
+            echo 'Invalid release channel' >&2
+            exit 1
+          fi
+          if [[ ! $R2_PREFIX =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]]; then
+            echo 'Invalid R2 object prefix' >&2
+            exit 1
+          fi
+          IFS='/' read -r -a segments <<< "$R2_PREFIX"
+          for segment in "${segments[@]}"; do
+            if [[ $segment == '.' || $segment == '..' ]]; then
+              echo 'Invalid R2 object prefix' >&2
+              exit 1
+            fi
+          done
+
+  build_test:
+    name: Build and test
+    needs: validate_config
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    outputs:
+      manifest_digest: ${{ steps.release.outputs.manifest_digest }}
+
+    steps:
+      - name: Check out the appliance source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Reclaim hosted-runner disk space
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          df -h "$GITHUB_WORKSPACE"
+
+      - name: Install Buildroot host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            bc \
+            bison \
+            build-essential \
+            ca-certificates \
+            cpio \
+            curl \
+            file \
+            flex \
+            git \
+            libncurses-dev \
+            patch \
+            perl \
+            python3 \
+            rsync \
+            unzip \
+            wget \
+            xz-utils
+
+      - name: Restore pinned source downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            appliances/v86/.work/downloads
+            appliances/v86/.work/buildroot-downloads
+          key: native-v86-downloads-${{ hashFiles('appliances/v86/versions.env', 'appliances/v86/buildroot/**') }}
+
+      - name: Build the pinned native appliance
+        env:
+          JOBS: '2'
+        run: ./appliances/v86/scripts/build-image.sh
+
+      - name: Discard the large intermediate build tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          source appliances/v86/versions.env
+          rm -rf \
+            "appliances/v86/.work/buildroot-$BUILDROOT_VERSION" \
+            appliances/v86/.work/output \
+            appliances/v86/.work/v86-package
+          df -h "$GITHUB_WORKSPACE"
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        with:
+          bun-version: 1.3.1
+
+      - name: Install JavaScript dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install the pinned Chromium runtime
+        run: bunx playwright install --with-deps chromium
+
+      - name: Run checks and mandatory native browser tests
+        env:
+          ANYCAST_LAB_NATIVE_MODE: local
+          ANYCAST_LAB_REQUIRE_NATIVE: '1'
+        run: bun run verify
+
+      - name: Verify the release bundle
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_line=$(node appliances/v86/scripts/verify-manifest.mjs appliances/v86/dist/manifest.json)
+          if [[ "$manifest_line" != "$(cat appliances/v86/dist/manifest.sha256)" ]]; then
+            echo 'Generated manifest.sha256 does not match the verified appliance bundle' >&2
+            exit 1
+          fi
+          digest=${manifest_line%% *}
+          echo "manifest_digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the verified workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-v86-${{ steps.release.outputs.manifest_digest }}
+          path: |
+            appliances/v86/dist/manifest.json
+            appliances/v86/dist/manifest.sha256
+            appliances/v86/dist/router-bzimage.bin
+            appliances/v86/dist/seabios.bin
+            appliances/v86/dist/vgabios.bin
+            appliances/v86/dist/v86.wasm
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  publish:
+    name: Publish to R2
+    needs: build_test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      AWS_DEFAULT_REGION: auto
+      R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+      R2_PREFIX: ${{ vars.R2_PREFIX || 'anycast-lab/native-v86' }}
+      R2_CORS_ORIGIN: ${{ vars.R2_CORS_ORIGIN || 'https://anycast.guide' }}
+      RELEASE_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'stable' }}
+      SOURCE_REVISION: ${{ github.sha }}
+
+    steps:
+      - name: Check out the publisher at the verified revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Download the verified native bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: native-v86-${{ needs.build_test.outputs.manifest_digest }}
+          path: appliances/v86/dist
+
+      - name: Install the R2 client
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends awscli curl
+
+      - name: Prepare the immutable release status
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_line=$(node appliances/v86/scripts/verify-manifest.mjs appliances/v86/dist/manifest.json)
+          if [[ "$manifest_line" != "$(cat appliances/v86/dist/manifest.sha256)" ]]; then
+            echo 'Downloaded manifest.sha256 does not match the verified appliance bundle' >&2
+            exit 1
+          fi
+          digest=${manifest_line%% *}
+          if [[ "$digest" != "${{ needs.build_test.outputs.manifest_digest }}" ]]; then
+            echo 'Downloaded bundle digest does not match the build job output' >&2
+            exit 1
+          fi
+          manifest_url="${R2_PUBLIC_BASE_URL%/}/$R2_PREFIX/objects/sha256/$digest/manifest.json"
+          status_path="$RUNNER_TEMP/native-v86-release-status.json"
+          published_at=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
+          node appliances/v86/scripts/release-status.mjs create \
+            --manifest appliances/v86/dist/manifest.json \
+            --manifest-sha256 appliances/v86/dist/manifest.sha256 \
+            --manifest-url "$manifest_url" \
+            --channel "$RELEASE_CHANNEL" \
+            --source-revision "$SOURCE_REVISION" \
+            --published-at "$published_at" \
+            --output "$status_path"
+          node appliances/v86/scripts/release-status.mjs validate --status "$status_path"
+          echo "status_path=$status_path" >> "$GITHUB_OUTPUT"
+
+      - name: Publish immutable objects and advance the R2 channel
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RELEASE_STATUS_PATH: ${{ steps.release.outputs.status_path }}
+        run: appliances/v86/scripts/publish-r2.sh

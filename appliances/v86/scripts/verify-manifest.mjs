@@ -1,25 +1,174 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-const manifestPath = resolve(process.argv[2] ?? 'dist/manifest.json');
-const manifestBytes = await readFile(manifestPath);
-const manifest = JSON.parse(manifestBytes.toString('utf8'));
-const expectedIds = new Set(['v86-wasm', 'bios', 'vga-bios', 'bzimage']);
+export const MAX_RELEASE_ARTIFACT_BYTES = 512 * 1024 * 1024;
 
-if (manifest.schemaVersion !== 1 || manifest.buildId !== 'anycastlab-v86-br2026.02.3-r1') {
-  throw new Error('Unexpected appliance manifest identity');
+export const PINNED_V86_MANIFEST_IDENTITY = Object.freeze({
+  schemaVersion: 1,
+  imageId: 'anycast-lab-router',
+  buildId: 'anycastlab-v86-br2026.02.3-r1',
+  sourceDateEpoch: 1_781_643_617,
+  buildroot: Object.freeze({
+    version: '2026.02.3',
+    sha256: '5a59e7501b0b4ec52c41f4bfa79412320e0b37eae5f719605a258e8d0c6fc7fb',
+  }),
+  v86: Object.freeze({
+    packageVersion: '0.5.424',
+    commit: '2f1346b0e7d88d4cbbbcc05fe15b4e369c3de23f',
+  }),
+  daemons: Object.freeze({
+    bird: '2.15.1',
+    frr: '10.5.1',
+  }),
+});
+
+const EXPECTED_ARTIFACTS = new Map([
+  ['v86-wasm', 'v86.wasm'],
+  ['bios', 'seabios.bin'],
+  ['vga-bios', 'vgabios.bin'],
+  ['bzimage', 'router-bzimage.bin'],
+]);
+
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
 }
-for (const artifact of manifest.artifacts ?? []) {
-  if (!expectedIds.delete(artifact.id)) throw new Error(`Unexpected or duplicate artifact ${artifact.id}`);
-  const bytes = await readFile(resolve(dirname(manifestPath), artifact.file));
-  const digest = createHash('sha256').update(bytes).digest('hex');
-  if (bytes.byteLength !== artifact.size || digest !== artifact.sha256) {
-    throw new Error(`Artifact verification failed: ${artifact.id}`);
+
+function requirePositiveInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer`);
   }
+  return value;
 }
-if (expectedIds.size !== 0) throw new Error(`Missing artifacts: ${[...expectedIds].join(', ')}`);
 
-const manifestDigest = createHash('sha256').update(manifestBytes).digest('hex');
-process.stdout.write(`${manifestDigest}  manifest.json\n`);
+function requireRecord(value, label) {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  return value;
+}
+
+function requirePowerOfTwo(value, label) {
+  const integer = requirePositiveInteger(value, label);
+  if (!Number.isInteger(Math.log2(integer))) throw new Error(`${label} must be a power of two`);
+  return integer;
+}
+
+/**
+ * Verify the complete deployable v86 bundle and return its trusted metadata.
+ * Only fixed, flat artifact names are accepted so a manifest cannot make the
+ * publisher or deployment sync read arbitrary files.
+ */
+export async function verifyV86ArtifactBundle(
+  manifestInput,
+  { expectedManifestSha256, maxArtifactBytes = MAX_RELEASE_ARTIFACT_BYTES } = {},
+) {
+  const manifestPath = resolve(manifestInput);
+  const manifestBytes = await readFile(manifestPath);
+  const manifestSha256 = sha256(manifestBytes);
+  if (expectedManifestSha256 !== undefined && manifestSha256 !== expectedManifestSha256) {
+    throw new Error(`Manifest digest mismatch: expected ${expectedManifestSha256}, received ${manifestSha256}`);
+  }
+
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestBytes.toString('utf8'));
+  } catch (error) {
+    throw new Error('Native artifact manifest is not valid JSON', { cause: error });
+  }
+  if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) {
+    throw new Error('Native artifact manifest must be an object');
+  }
+  if (
+    manifest.schemaVersion !== PINNED_V86_MANIFEST_IDENTITY.schemaVersion ||
+    manifest.imageId !== PINNED_V86_MANIFEST_IDENTITY.imageId ||
+    manifest.buildId !== PINNED_V86_MANIFEST_IDENTITY.buildId ||
+    manifest.sourceDateEpoch !== PINNED_V86_MANIFEST_IDENTITY.sourceDateEpoch
+  ) {
+    throw new Error('Unexpected appliance manifest identity');
+  }
+  const buildroot = requireRecord(manifest.buildroot, 'buildroot');
+  if (
+    buildroot.version !== PINNED_V86_MANIFEST_IDENTITY.buildroot.version ||
+    buildroot.sha256 !== PINNED_V86_MANIFEST_IDENTITY.buildroot.sha256
+  ) {
+    throw new Error('Unexpected Buildroot release metadata');
+  }
+  const v86 = requireRecord(manifest.v86, 'v86');
+  if (
+    v86.packageVersion !== PINNED_V86_MANIFEST_IDENTITY.v86.packageVersion ||
+    v86.commit !== PINNED_V86_MANIFEST_IDENTITY.v86.commit
+  ) {
+    throw new Error('Unexpected v86 release metadata');
+  }
+  const daemons = requireRecord(manifest.daemons, 'daemons');
+  if (
+    daemons.bird !== PINNED_V86_MANIFEST_IDENTITY.daemons.bird ||
+    daemons.frr !== PINNED_V86_MANIFEST_IDENTITY.daemons.frr
+  ) {
+    throw new Error('Unexpected routing daemon release metadata');
+  }
+  const machine = requireRecord(manifest.machine, 'machine');
+  const memoryBytes = requirePowerOfTwo(machine.memoryBytes, 'machine.memoryBytes');
+  requirePowerOfTwo(machine.vgaMemoryBytes, 'machine.vgaMemoryBytes');
+  const trunkMtu = requirePositiveInteger(machine.trunkMtu, 'machine.trunkMtu');
+  if (trunkMtu < 1504 || trunkMtu > 65_535) {
+    throw new Error('machine.trunkMtu must be between 1504 and 65535');
+  }
+  if (!Array.isArray(manifest.artifacts) || manifest.artifacts.length !== EXPECTED_ARTIFACTS.size) {
+    throw new Error(`Expected exactly ${EXPECTED_ARTIFACTS.size} native artifacts`);
+  }
+
+  const remaining = new Map(EXPECTED_ARTIFACTS);
+  const artifacts = [];
+  for (const artifact of manifest.artifacts) {
+    if (typeof artifact !== 'object' || artifact === null || typeof artifact.id !== 'string') {
+      throw new Error('Invalid native artifact entry');
+    }
+    const expectedFile = remaining.get(artifact.id);
+    if (expectedFile === undefined) throw new Error(`Unexpected or duplicate artifact ${artifact.id}`);
+    if (artifact.file !== expectedFile || basename(artifact.file) !== artifact.file) {
+      throw new Error(`Artifact ${artifact.id} must use the fixed filename ${expectedFile}`);
+    }
+    remaining.delete(artifact.id);
+    const declaredSize = requirePositiveInteger(artifact.size, `${artifact.id}.size`);
+    if (declaredSize > maxArtifactBytes) {
+      throw new Error(`Artifact ${artifact.id} exceeds the ${maxArtifactBytes}-byte release safety limit`);
+    }
+    if (typeof artifact.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(artifact.sha256)) {
+      throw new Error(`Artifact ${artifact.id} has an invalid SHA-256 digest`);
+    }
+
+    const path = resolve(dirname(manifestPath), artifact.file);
+    const bytes = await readFile(path);
+    const digest = sha256(bytes);
+    if (bytes.byteLength !== declaredSize || digest !== artifact.sha256) {
+      throw new Error(`Artifact verification failed: ${artifact.id}`);
+    }
+    artifacts.push({
+      id: artifact.id,
+      file: artifact.file,
+      path,
+      size: bytes.byteLength,
+      sha256: digest,
+    });
+  }
+  if (remaining.size !== 0) throw new Error(`Missing artifacts: ${[...remaining.keys()].join(', ')}`);
+
+  return {
+    manifestPath,
+    manifest,
+    manifestBytes,
+    manifestSha256,
+    memoryBytes,
+    artifacts,
+  };
+}
+
+const invokedPath = process.argv[1] === undefined ? undefined : pathToFileURL(resolve(process.argv[1])).href;
+if (invokedPath === import.meta.url) {
+  const result = await verifyV86ArtifactBundle(process.argv[2] ?? 'dist/manifest.json');
+  process.stdout.write(`${result.manifestSha256}  manifest.json\n`);
+}

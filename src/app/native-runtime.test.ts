@@ -24,6 +24,20 @@ describe('native runtime deployment status', () => {
     });
   });
 
+  it('accepts an HTTPS manifest on a dedicated artifact origin', () => {
+    expect(parseNativeRuntimeStatus({
+      schemaVersion: 1,
+      nativeV86: true,
+      manifestUrl: 'https://assets.example/v86/sha256/abc/manifest.json',
+      manifestSha256: digest,
+      buildId: 'image-r1',
+      memoryBytes: 128 * 1024 * 1024,
+    }, 'https://guide.example/lab/')).toMatchObject({
+      available: true,
+      manifestUrl: 'https://assets.example/v86/sha256/abc/manifest.json',
+    });
+  });
+
   it('reports a deliberate artifact-free deployment without throwing', () => {
     expect(parseNativeRuntimeStatus({ schemaVersion: 1, nativeV86: false }, 'https://guide.example/lab/')).toEqual({
       available: false,
@@ -82,6 +96,64 @@ describe('native runtime deployment status', () => {
       'https://guide.example/lab/runtime/status.json',
       { cache: 'no-store' },
     );
+  });
+
+  it('follows one external release-status pointer and resolves its manifest URL', async () => {
+    const releaseStatusUrl = 'https://assets.example/v86/channels/stable/status.json';
+    const fetchImplementation = vi.fn(async (url: string | URL | Request) => {
+      if (String(url) === 'https://guide.example/lab/runtime/status.json') {
+        return Response.json({ schemaVersion: 1, nativeV86: true, releaseStatusUrl });
+      }
+      if (String(url) === releaseStatusUrl) {
+        return Response.json({
+          schemaVersion: 1,
+          nativeV86: true,
+          manifestUrl: 'https://assets.example/v86/objects/sha256/abc/manifest.json',
+          manifestSha256: digest,
+          buildId: 'image-r1',
+          memoryBytes: 128 * 1024 * 1024,
+        });
+      }
+      return new Response('', { status: 404 });
+    });
+
+    await expect(loadNativeRuntimeAvailability('https://guide.example/lab/', fetchImplementation)).resolves.toEqual({
+      available: true,
+      manifestUrl: 'https://assets.example/v86/objects/sha256/abc/manifest.json',
+      manifestSha256: digest,
+      buildId: 'image-r1',
+      memoryBytes: 128 * 1024 * 1024,
+    });
+    expect(fetchImplementation).toHaveBeenNthCalledWith(1, 'https://guide.example/lab/runtime/status.json', { cache: 'no-store' });
+    expect(fetchImplementation).toHaveBeenNthCalledWith(2, releaseStatusUrl, { cache: 'no-store' });
+  });
+
+  it('rejects insecure or recursively redirected external status metadata', async () => {
+    const insecureFetch = vi.fn(async () => Response.json({
+      schemaVersion: 1,
+      nativeV86: true,
+      releaseStatusUrl: 'http://assets.example/status.json',
+    }));
+    await expect(loadNativeRuntimeAvailability('https://guide.example/lab/', insecureFetch)).resolves.toMatchObject({
+      available: false,
+      reason: expect.stringContaining('must use HTTPS'),
+    });
+
+    const recursiveFetch = vi.fn()
+      .mockResolvedValueOnce(Response.json({
+        schemaVersion: 1,
+        nativeV86: true,
+        releaseStatusUrl: 'https://assets.example/stable/status.json',
+      }))
+      .mockResolvedValueOnce(Response.json({
+        schemaVersion: 1,
+        nativeV86: true,
+        releaseStatusUrl: 'https://assets.example/other/status.json',
+      }));
+    await expect(loadNativeRuntimeAvailability('https://guide.example/lab/', recursiveFetch)).resolves.toEqual({
+      available: false,
+      reason: 'External native runtime status cannot redirect to another status document',
+    });
   });
 });
 

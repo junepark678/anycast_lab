@@ -50,8 +50,10 @@ disk and no route to the public Internet.
 ### Verified artifacts and boot
 
 The build emits a manifest, its digest, the Linux `bzImage`, v86 WASM, SeaBIOS,
-and VGA BIOS. Packaging publishes runtime status plus the manifest digest. The
-browser verifies the manifest and each artifact before constructing a VM.
+and VGA BIOS. A dedicated release workflow publishes these under immutable,
+digest-addressed R2 keys, then advances a channel status document as its final
+write. The guide packages only a same-origin pointer to that external status.
+The browser verifies the manifest and each artifact before constructing a VM.
 
 Each requested guest interface becomes an 802.1Q subinterface of v86's single
 virtual NIC. The private VLAN tag is consumed by the adapter and never appears

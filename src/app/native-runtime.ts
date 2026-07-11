@@ -40,9 +40,12 @@ export function parseNativeRuntimeStatus(
     throw new Error('Native runtime status has an invalid memory size');
   }
   const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+  const manifestUrl = status.manifestUrl === undefined
+    ? new URL('runtime/v86/manifest.json', normalizedBase).href
+    : parseRuntimeUrl(status.manifestUrl, normalizedBase, 'manifestUrl');
   return {
     available: true,
-    manifestUrl: new URL('runtime/v86/manifest.json', normalizedBase).href,
+    manifestUrl,
     manifestSha256: status.manifestSha256,
     buildId: status.buildId,
     memoryBytes: Number(status.memoryBytes),
@@ -63,13 +66,52 @@ export async function loadNativeRuntimeAvailability(
     if (!response.headers.get('content-type')?.includes('application/json')) {
       return { available: false, reason: 'This deployment does not publish native VM runtime metadata.' };
     }
-    return parseNativeRuntimeStatus(await response.json(), normalizedBase);
+    const localStatus = await response.json() as unknown;
+    const releaseStatusUrl = parseReleaseStatusUrl(localStatus, normalizedBase);
+    if (releaseStatusUrl === null) return parseNativeRuntimeStatus(localStatus, normalizedBase);
+
+    const releaseResponse = await fetchImplementation(releaseStatusUrl, { cache: 'no-store' });
+    if (!releaseResponse.ok) {
+      return { available: false, reason: `External native runtime status returned HTTP ${releaseResponse.status}.` };
+    }
+    if (!releaseResponse.headers.get('content-type')?.includes('application/json')) {
+      return { available: false, reason: 'The external native runtime origin did not return JSON metadata.' };
+    }
+    const releaseStatus = await releaseResponse.json() as unknown;
+    if (parseReleaseStatusUrl(releaseStatus, releaseStatusUrl) !== null) {
+      throw new Error('External native runtime status cannot redirect to another status document');
+    }
+    return parseNativeRuntimeStatus(releaseStatus, new URL('.', releaseStatusUrl).href);
   } catch (error) {
     return {
       available: false,
       reason: error instanceof Error ? error.message : 'Native runtime status could not be loaded.',
     };
   }
+}
+
+function parseReleaseStatusUrl(value: unknown, baseUrl: string): string | null {
+  if (typeof value !== 'object' || value === null || !('releaseStatusUrl' in value)) return null;
+  const status = value as Record<string, unknown>;
+  if (status.schemaVersion !== 1 || status.nativeV86 !== true) {
+    throw new Error('External native runtime pointer has an invalid schema');
+  }
+  return parseRuntimeUrl(status.releaseStatusUrl, baseUrl, 'releaseStatusUrl');
+}
+
+function parseRuntimeUrl(value: unknown, baseUrl: string, label: string): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`Native runtime status has an invalid ${label}`);
+  }
+  const url = new URL(value, baseUrl);
+  const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) {
+    throw new Error(`Native runtime ${label} must use HTTPS`);
+  }
+  if (url.username !== '' || url.password !== '' || url.hash !== '') {
+    throw new Error(`Native runtime ${label} cannot contain credentials or a fragment`);
+  }
+  return url.href;
 }
 
 export function nativeMemoryEstimate(
