@@ -11,7 +11,9 @@ export const APPLIANCE_CACHE_INPUTS = Object.freeze([
   'buildroot',
   'scripts/appliance-cache-key.mjs',
   'scripts/build-image.sh',
+  'scripts/pgo-profile-set.mjs',
   'scripts/verify-manifest.mjs',
+  'scripts/verify-optimized-daemons.sh',
   'versions.env',
 ]);
 

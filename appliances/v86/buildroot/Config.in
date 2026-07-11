@@ -1,1 +1,2 @@
-# The appliance uses packages from Buildroot itself; no external packages.
+# The host-only anycast-clang-toolchain package is an explicit build dependency
+# from external.mk and intentionally has no user-selectable target option.

@@ -1,0 +1,3 @@
+# Hashes are identical to Buildroot 2026.02.3's pinned compiler-rt package.
+sha256  dd54ae21aee1780fac59445b51ebff601ad016b31ac3a7de3b21126fd3ccb229  compiler-rt-21.1.8.src.tar.xz
+sha256  1a8f1058753f1ba890de984e48f0242a3a5c29a6a8f2ed9fd813f36985387e8d  LICENSE.TXT

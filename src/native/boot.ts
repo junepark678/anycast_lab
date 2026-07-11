@@ -60,7 +60,8 @@ cleanup() {
   rm -f /run/anycastlab/frr.ready
   /usr/libexec/anycastlab-frr stop >/dev/null 2>&1 || true
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 0' INT TERM
 ready=0
 attempt=0
 while [ "$attempt" -lt 120 ]; do

@@ -4,10 +4,12 @@ import {
   PINNED_BIRD_VERSION,
   PINNED_BUILDROOT_VERSION,
   PINNED_FRR_VERSION,
+  PINNED_LLVM_VERSION,
   PINNED_V86_COMMIT,
   PINNED_V86_PACKAGE_VERSION,
   V86_IMAGE_BUILD_ID,
   loadVerifiedV86Artifacts,
+  parseV86ArtifactManifest,
   type V86ArtifactId,
 } from './manifest';
 
@@ -41,6 +43,10 @@ describe('v86 artifact verification', () => {
     );
 
     expect(bundle.manifest.buildId).toBe(V86_IMAGE_BUILD_ID);
+    expect(bundle.manifest.toolchain).toMatchObject({
+      compiler: 'clang', compilerVersion: PINNED_LLVM_VERSION, optimization: 'O3', lto: 'thin',
+    });
+    expect(bundle.manifest.pgo).toMatchObject({ mode: 'use', profileSetBuildKey: '2'.repeat(64) });
     expect(bundle.artifacts.bzimage).toEqual(artifacts.bzimage);
     expect(fetch).toHaveBeenCalledTimes(5);
   });
@@ -71,7 +77,27 @@ describe('v86 artifact verification', () => {
       ),
     ).rejects.toThrow(/bzimage digest mismatch/);
   });
+
+  it('rejects incomplete PGO provenance and a non-pinned daemon toolchain', async () => {
+    const artifacts: Record<V86ArtifactId, Uint8Array> = {
+      'v86-wasm': new Uint8Array([0]),
+      bios: new Uint8Array([1]),
+      'vga-bios': new Uint8Array([2]),
+      bzimage: new Uint8Array([3]),
+    };
+    const missingProfile = manifestFor(artifacts);
+    missingProfile.pgo.birdProfileSha256 = null as never;
+    expect(() => loadManifestOnly(missingProfile)).toThrow(/complete profile identity/);
+
+    const wrongCompiler = manifestFor(artifacts);
+    wrongCompiler.toolchain.compilerVersion = '22.0.0' as never;
+    expect(() => loadManifestOnly(wrongCompiler)).toThrow(/pinned Clang O3 ThinLTO/);
+  });
 });
+
+function loadManifestOnly(value: unknown) {
+  return parseV86ArtifactManifest(value);
+}
 
 function manifestFor(artifacts: Record<V86ArtifactId, Uint8Array>) {
   return {
@@ -85,6 +111,21 @@ function manifestFor(artifacts: Record<V86ArtifactId, Uint8Array>) {
     },
     v86: { packageVersion: PINNED_V86_PACKAGE_VERSION, commit: PINNED_V86_COMMIT },
     daemons: { bird: PINNED_BIRD_VERSION, frr: PINNED_FRR_VERSION },
+    toolchain: {
+      scope: 'bird-and-frr',
+      compiler: 'clang',
+      compilerVersion: PINNED_LLVM_VERSION,
+      linker: 'lld',
+      optimization: 'O3',
+      lto: 'thin',
+    },
+    pgo: {
+      mode: 'use',
+      contextSha256: '1'.repeat(64),
+      profileSetBuildKey: '2'.repeat(64),
+      birdProfileSha256: '3'.repeat(64),
+      frrProfileSha256: '4'.repeat(64),
+    },
     machine: { memoryBytes: 256 * 1024 * 1024, vgaMemoryBytes: 2 * 1024 * 1024, trunkMtu: 65_535 },
     artifacts: Object.entries(artifacts).map(([id, bytes]) => ({
       id,

@@ -41,6 +41,13 @@ async function createFixture(root) {
   }
   const manifestBytes = Buffer.from(`${JSON.stringify({
     ...PINNED_V86_MANIFEST_IDENTITY,
+    pgo: {
+      mode: 'use',
+      contextSha256: '1'.repeat(64),
+      profileSetBuildKey: '2'.repeat(64),
+      birdProfileSha256: '3'.repeat(64),
+      frrProfileSha256: '4'.repeat(64),
+    },
     machine: {
       memoryBytes: 128 * 1024 * 1024,
       vgaMemoryBytes: 2 * 1024 * 1024,
@@ -333,6 +340,30 @@ describe('publish-oci.sh', () => {
 
     await expect(execute('bash', [publisher], { env })).rejects.toMatchObject({
       stderr: expect.stringContaining('Required OCI publish configuration is missing: OCI_PAR_BASE_URL'),
+    });
+    await expect(readFile(env.MOCK_OCI_LOG, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses to publish a training image without PGO-use provenance', async () => {
+    const root = await temporaryDirectory();
+    const fixture = await createFixture(root);
+    const manifestPath = resolve(fixture.artifactDirectory, 'manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    manifest.pgo = {
+      mode: 'generate',
+      contextSha256: '1'.repeat(64),
+      profileSetBuildKey: null,
+      birdProfileSha256: null,
+      frrProfileSha256: null,
+    };
+    const bytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
+    await writeFile(manifestPath, bytes);
+    await writeFile(resolve(fixture.artifactDirectory, 'manifest.sha256'), `${digest(bytes)}  manifest.json\n`);
+    const bin = await createMockCurl(root);
+    const env = environment(root, fixture, bin);
+
+    await expect(execute('bash', [publisher], { env })).rejects.toMatchObject({
+      stderr: expect.stringContaining('requires PGO mode use'),
     });
     await expect(readFile(env.MOCK_OCI_LOG, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
   });

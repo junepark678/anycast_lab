@@ -81,9 +81,13 @@ jobs:
     name: Build and test
     needs: validate_config
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 360
     outputs:
       manifest_digest: ${{ steps.release.outputs.manifest_digest }}
+    env:
+      BR2_CCACHE_DIR: ${{ github.workspace }}/appliances/v86/.work/ccache
+      PGO_PROFILE_DIR: ${{ github.workspace }}/appliances/v86/.work/pgo/profiles
+      PGO_RAW_DIR: ${{ github.workspace }}/appliances/v86/.work/pgo/raw
 
     steps:
       - name: Check out the appliance source
@@ -99,23 +103,32 @@ jobs:
           digest=$(node appliances/v86/scripts/appliance-cache-key.mjs)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Restore the verified native bundle
-        id: native_bundle_cache
+      - name: Calculate the PGO training-context digest
+        id: pgo_context
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p appliances/v86/.work/pgo
+          digest=$(node appliances/v86/scripts/pgo-profile-set.mjs context \
+            --root appliances/v86 \
+            --output appliances/v86/.work/pgo/profile-context.json)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the trusted PGO profile set
+        id: pgo_profile_cache
         if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
-          path: appliances/v86/dist
-          key: native-v86-bundle-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}
+          path: appliances/v86/.work/pgo/profiles
+          key: native-v86-pgo-profiles-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.pgo_context.outputs.digest }}
 
       - name: Reclaim hosted-runner disk space
-        if: steps.native_bundle_cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
           df -h "$GITHUB_WORKSPACE"
 
       - name: Install Buildroot host dependencies
-        if: steps.native_bundle_cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
@@ -138,8 +151,8 @@ jobs:
             xz-utils
 
       - name: Restore pinned source downloads
-        if: steps.native_bundle_cache.outputs.cache-hit != 'true'
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        id: source_downloads_cache
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: |
             appliances/v86/.work/downloads
@@ -148,43 +161,15 @@ jobs:
           restore-keys: |
             native-v86-downloads-
 
-      - name: Restore the Buildroot compiler cache
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && steps.native_bundle_cache.outputs.cache-hit != 'true'
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      - name: Restore the Buildroot compiler cache for training
+        id: ccache_training_restore
+        if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch' && steps.pgo_profile_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: appliances/v86/.work/ccache
-          key: native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('appliances/v86/versions.env') }}-${{ github.run_id }}
+          key: native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-${{ github.run_id }}
           restore-keys: |
-            native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('appliances/v86/versions.env') }}-
-
-      - name: Build the pinned native appliance
-        if: steps.native_bundle_cache.outputs.cache-hit != 'true'
-        env:
-          BR2_CCACHE_DIR: ${{ github.workspace }}/appliances/v86/.work/ccache
-          JOBS: '2'
-        run: ./appliances/v86/scripts/build-image.sh
-
-      - name: Verify the restored or built native bundle
-        shell: bash
-        run: |
-          set -euo pipefail
-          manifest_line=$(node appliances/v86/scripts/verify-manifest.mjs appliances/v86/dist/manifest.json)
-          if [[ "$manifest_line" != "$(cat appliances/v86/dist/manifest.sha256)" ]]; then
-            echo 'Native bundle cache failed manifest verification' >&2
-            exit 1
-          fi
-
-      - name: Discard the large intermediate build tree
-        if: steps.native_bundle_cache.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          source appliances/v86/versions.env
-          rm -rf \
-            "appliances/v86/.work/buildroot-$BUILDROOT_VERSION" \
-            appliances/v86/.work/output \
-            appliances/v86/.work/v86-package
-          df -h "$GITHUB_WORKSPACE"
+            native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-
 
       - name: Install Bun
         uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
@@ -197,18 +182,218 @@ jobs:
       - name: Install the pinned Chromium runtime
         run: bunx playwright install --with-deps chromium
 
-      - name: Run checks and mandatory native browser tests
+      - name: Build the instrumented native appliance
+        if: steps.pgo_profile_cache.outputs.cache-hit != 'true'
+        env:
+          ANYCAST_PGO_MODE: generate
+          JOBS: '2'
+          LLVM_JOBS: '2'
+        run: ./appliances/v86/scripts/build-image.sh
+
+      - name: Verify the instrumented native bundle
+        if: steps.pgo_profile_cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          EXPECTED_PGO_CONTEXT: ${{ steps.pgo_context.outputs.digest }}
+        run: |
+          set -euo pipefail
+          manifest_line=$(node appliances/v86/scripts/verify-manifest.mjs appliances/v86/dist/manifest.json)
+          if [[ "$manifest_line" != "$(cat appliances/v86/dist/manifest.sha256)" ]]; then
+            echo 'Instrumented manifest.sha256 does not match the verified appliance bundle' >&2
+            exit 1
+          fi
+          node - <<'NODE'
+          const { readFileSync } = require('node:fs');
+          const manifest = JSON.parse(readFileSync('appliances/v86/dist/manifest.json', 'utf8'));
+          if (manifest.pgo?.mode !== 'generate') throw new Error('Training bundle is not PGO-instrumented');
+          if (manifest.pgo.contextSha256 !== process.env.EXPECTED_PGO_CONTEXT) {
+            throw new Error('Training bundle PGO context does not match this workflow');
+          }
+          NODE
+
+      - name: Build the instrumented lab
+        if: steps.pgo_profile_cache.outputs.cache-hit != 'true'
+        run: bun run build:required
+
+      - name: Train BIRD and FRR in the native browser lab
+        if: steps.pgo_profile_cache.outputs.cache-hit != 'true'
         env:
           ANYCAST_LAB_NATIVE_MODE: local
           ANYCAST_LAB_REQUIRE_NATIVE: '1'
-        run: bun run verify
+          ANYCAST_LAB_COLLECT_PGO: '1'
+          ANYCAST_LAB_PGO_RAW_DIR: ${{ env.PGO_RAW_DIR }}
+        run: bunx playwright test e2e/native-vm.spec.ts
+
+      - name: Merge and seal the trained PGO profiles
+        if: steps.pgo_profile_cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$PGO_RAW_DIR/training-evidence.json"
+          node appliances/v86/scripts/pgo-profile-set.mjs merge \
+            --root appliances/v86 \
+            --profile-dir "$PGO_PROFILE_DIR" \
+            --build-output appliances/v86/.work/output \
+            --bird-archive "$PGO_RAW_DIR/bird-native.tar" \
+            --frr-archive "$PGO_RAW_DIR/frr-native.tar" \
+            --evidence "$PGO_RAW_DIR/training-evidence.json" \
+            --manifest appliances/v86/dist/manifest.json
+
+      - name: Validate the exact PGO profile set
+        id: pgo_profiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_key=$(node appliances/v86/scripts/pgo-profile-set.mjs validate \
+            --root appliances/v86 \
+            --profile-dir "$PGO_PROFILE_DIR")
+          echo "build_key=$build_key" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the verified final native bundle
+        id: final_bundle_cache
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: appliances/v86/dist
+          key: native-v86-pgo-bundle-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-${{ steps.pgo_profiles.outputs.build_key }}
+
+      - name: Restore the Buildroot compiler cache for the optimized build
+        id: ccache_optimized_restore
+        if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch' && steps.pgo_profile_cache.outputs.cache-hit == 'true' && steps.final_bundle_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: appliances/v86/.work/ccache
+          key: native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-${{ github.run_id }}
+          restore-keys: |
+            native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-
+
+      - name: Build the optimized native appliance
+        if: steps.final_bundle_cache.outputs.cache-hit != 'true'
+        env:
+          ANYCAST_PGO_MODE: use
+          ANYCAST_PGO_PROFILE_DIR: ${{ env.PGO_PROFILE_DIR }}
+          JOBS: '2'
+          LLVM_JOBS: '2'
+        run: ./appliances/v86/scripts/build-image.sh
+
+      - name: Verify the optimized native bundle and profile provenance
+        shell: bash
+        env:
+          EXPECTED_PGO_CONTEXT: ${{ steps.pgo_context.outputs.digest }}
+          EXPECTED_PROFILE_BUILD_KEY: ${{ steps.pgo_profiles.outputs.build_key }}
+        run: |
+          set -euo pipefail
+          manifest_line=$(node appliances/v86/scripts/verify-manifest.mjs \
+            --require-pgo-use appliances/v86/dist/manifest.json)
+          if [[ "$manifest_line" != "$(cat appliances/v86/dist/manifest.sha256)" ]]; then
+            echo 'Optimized manifest.sha256 does not match the verified appliance bundle' >&2
+            exit 1
+          fi
+          node - <<'NODE'
+          const { readFileSync } = require('node:fs');
+          const manifest = JSON.parse(readFileSync('appliances/v86/dist/manifest.json', 'utf8'));
+          if (manifest.pgo?.mode !== 'use') throw new Error('Release bundle is not PGO-optimized');
+          if (manifest.pgo.contextSha256 !== process.env.EXPECTED_PGO_CONTEXT) {
+            throw new Error('Release bundle PGO context does not match this workflow');
+          }
+          if (manifest.pgo.profileSetBuildKey !== process.env.EXPECTED_PROFILE_BUILD_KEY) {
+            throw new Error('Release bundle does not identify the validated PGO profile set');
+          }
+          NODE
+
+      - name: Build the final lab
+        run: bun run build:required
+
+      - name: Run the TypeScript check
+        run: bun run check
+
+      - name: Run lint
+        run: bun run lint
+
+      - name: Run unit tests
+        run: bun run test
+
+      - name: Run the native BIRD ABI harness
+        run: bun run test:bird-abi
+
+      - name: Run the final native browser test
+        env:
+          ANYCAST_LAB_NATIVE_MODE: local
+          ANYCAST_LAB_REQUIRE_NATIVE: '1'
+        run: bunx playwright test e2e/native-vm.spec.ts
+
+      - name: Save verified source downloads
+        if: steps.pgo_profile_cache.outputs.cache-hit != 'true' || steps.final_bundle_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            appliances/v86/.work/downloads
+            appliances/v86/.work/buildroot-downloads
+          key: native-v86-downloads-${{ hashFiles('appliances/v86/versions.env', 'appliances/v86/buildroot/**') }}
+
+      - name: Save the verified Buildroot compiler cache
+        if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch' && (steps.pgo_profile_cache.outputs.cache-hit != 'true' || steps.final_bundle_cache.outputs.cache-hit != 'true')
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: appliances/v86/.work/ccache
+          key: native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-${{ github.run_id }}
+
+      - name: Save the verified PGO profile set
+        if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch' && steps.pgo_profile_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: appliances/v86/.work/pgo/profiles
+          key: native-v86-pgo-profiles-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.pgo_context.outputs.digest }}
+
+      - name: Save the verified final native bundle
+        if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch' && steps.final_bundle_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: appliances/v86/dist
+          key: native-v86-pgo-bundle-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-${{ steps.pgo_profiles.outputs.build_key }}
+
+      - name: Upload the validated PGO profile set
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-v86-pgo-profiles-${{ steps.pgo_profiles.outputs.build_key }}
+          path: |
+            appliances/v86/.work/pgo/profiles/profile-set.json
+            appliances/v86/.work/pgo/profiles/bird.profdata
+            appliances/v86/.work/pgo/profiles/frr.profdata
+            appliances/v86/.work/pgo/profiles/training-evidence.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Discard the large intermediate build tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          source appliances/v86/versions.env
+          rm -rf \
+            "appliances/v86/.work/buildroot-$BUILDROOT_VERSION" \
+            appliances/v86/.work/output \
+            appliances/v86/.work/v86-package
+          df -h "$GITHUB_WORKSPACE"
+
+      - name: Run the remaining browser tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t specs < <(find e2e -maxdepth 1 -type f -name '*.spec.ts' ! -name 'native-vm.spec.ts' -print | sort)
+          if (( ${#specs[@]} == 0 )); then
+            echo 'No non-native browser tests were found' >&2
+            exit 1
+          fi
+          bunx playwright test "${specs[@]}"
 
       - name: Verify the release bundle
         id: release
         shell: bash
         run: |
           set -euo pipefail
-          manifest_line=$(node appliances/v86/scripts/verify-manifest.mjs appliances/v86/dist/manifest.json)
+          manifest_line=$(node appliances/v86/scripts/verify-manifest.mjs \
+            --require-pgo-use appliances/v86/dist/manifest.json)
           if [[ "$manifest_line" != "$(cat appliances/v86/dist/manifest.sha256)" ]]; then
             echo 'Generated manifest.sha256 does not match the verified appliance bundle' >&2
             exit 1
@@ -266,7 +451,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          manifest_line=$(node appliances/v86/scripts/verify-manifest.mjs appliances/v86/dist/manifest.json)
+          manifest_line=$(node appliances/v86/scripts/verify-manifest.mjs \
+            --require-pgo-use appliances/v86/dist/manifest.json)
           if [[ "$manifest_line" != "$(cat appliances/v86/dist/manifest.sha256)" ]]; then
             echo 'Downloaded manifest.sha256 does not match the verified appliance bundle' >&2
             exit 1

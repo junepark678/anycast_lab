@@ -2,25 +2,110 @@
 set -u
 
 PROTOCOL=ANYCASTLAB/1
-HOST_MOUNT=/mnt/anycast-host
+HOST_MOUNT=${ANYCASTLAB_HOST_MOUNT:-/mnt/anycast-host}
 INPUT="$HOST_MOUNT/anycastlab-in.tar"
 OUTPUT="$HOST_MOUNT/anycastlab-out.tar"
+RUNTIME_DIR=${ANYCASTLAB_RUNTIME_DIR:-/run/anycastlab}
+PID_FILE="$RUNTIME_DIR/appliance.pid"
+EXPECTED_EXIT="$RUNTIME_DIR/appliance.expected-exit"
+MONITOR_INTERVAL=${ANYCASTLAB_MONITOR_INTERVAL:-1}
+PGO_DIR=${ANYCASTLAB_PGO_DIR:-/tmp/anycast-pgo}
+PGO_MARKER=${ANYCASTLAB_PGO_MARKER:-/etc/anycastlab/pgo-generate}
+PGO_STOP_ATTEMPTS=${ANYCASTLAB_PGO_STOP_ATTEMPTS:-120}
+PGO_MAX_BYTES=${ANYCASTLAB_PGO_MAX_BYTES:-67108864}
+PGO_MAX_FILES=128
 
 reply_ok() { printf '%s OK %s\n' "$PROTOCOL" "$1"; }
 reply_error() { printf '%s ERR %s %s\n' "$PROTOCOL" "$1" "$2"; }
 
 monitor_appliance() {
-  [ -r /run/anycastlab/appliance.pid ] || return
-  pid=$(cat /run/anycastlab/appliance.pid)
-  while kill -0 "$pid" 2>/dev/null; do sleep 1; done
+  [ -r "$PID_FILE" ] || return
+  pid=$(cat "$PID_FILE")
+  while kill -0 "$pid" 2>/dev/null; do sleep "$MONITOR_INTERVAL"; done
+  # PGO training stops the real daemon gracefully so its instrumentation can
+  # flush. The serial shell and control agent intentionally remain alive long
+  # enough to export those files over 9p; every unmarked exit is still fatal.
+  [ -e "$EXPECTED_EXIT" ] && return
   printf '%s EXIT appliance-process-exited\n' "$PROTOCOL"
 }
 
-[ -r /run/anycastlab/appliance.pid ] || {
+collect_pgo() {
+  request_id=$1
+  if [ ! -f "$PGO_MARKER" ]; then
+    reply_error "$request_id" PGO_NOT_INSTRUMENTED
+    return
+  fi
+  if ! : >"$EXPECTED_EXIT"; then
+    reply_error "$request_id" EXPECTED_EXIT_MARKER_FAILED
+    return
+  fi
+  pid=$(cat "$PID_FILE")
+  if ! kill "$pid" 2>/dev/null; then
+    rm -f "$EXPECTED_EXIT"
+    reply_error "$request_id" PGO_STOP_FAILED
+    return
+  fi
+  attempt=0
+  while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt "$PGO_STOP_ATTEMPTS" ]; do
+    attempt=$((attempt + 1))
+    sleep 0.25
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    rm -f "$EXPECTED_EXIT"
+    reply_error "$request_id" PGO_STOP_TIMEOUT
+    return
+  fi
+
+  temporary="$OUTPUT.tmp.$$"
+  rm -f "$temporary"
+  status=0
+  (
+    cd "$PGO_DIR" || exit 10
+    set -- daemon-*.profraw
+    [ -f "$1" ] || exit 11
+    total=0
+    count=0
+    for profile do
+      case "$profile" in
+        daemon-bird_*.profraw|daemon-frr_*.profraw) ;;
+        *) exit 12 ;;
+      esac
+      case "$profile" in
+        *[!A-Za-z0-9._-]*) exit 12 ;;
+      esac
+      [ -f "$profile" ] && [ ! -L "$profile" ] && [ -s "$profile" ] || exit 13
+      count=$((count + 1))
+      [ "$count" -le "$PGO_MAX_FILES" ] || exit 15
+      size=$(wc -c <"$profile" | tr -d ' ')
+      total=$((total + size))
+      [ "$total" -le "$PGO_MAX_BYTES" ] || exit 14
+    done
+    LC_ALL=C tar -cpf "$temporary" "$@"
+  ) || status=$?
+  if [ "$status" -ne 0 ]; then
+    rm -f "$temporary"
+    reply_error "$request_id" "INVALID_PGO_PROFILES_$status"
+    return
+  fi
+  if ! mv -f "$temporary" "$OUTPUT"; then
+    rm -f "$temporary"
+    reply_error "$request_id" PGO_EXPORT_FAILED
+    return
+  fi
+  sync
+  reply_ok "$request_id"
+}
+
+[ "${ANYCASTLAB_AGENT_MONITOR_ONLY:-0}" = 1 ] && {
+  monitor_appliance
+  exit 0
+}
+
+[ -r "$PID_FILE" ] || {
   printf '%s FAILED appliance-pid-missing\n' "$PROTOCOL"
   exit 1
 }
-appliance_pid=$(cat /run/anycastlab/appliance.pid)
+appliance_pid=$(cat "$PID_FILE")
 kill -0 "$appliance_pid" 2>/dev/null || {
   printf '%s FAILED appliance-process-exited\n' "$PROTOCOL"
   exit 1
@@ -89,6 +174,7 @@ while IFS= read -r line; do
         *) reply_error "$request_id" BAD_STATE ;;
       esac
       ;;
+    COLLECT_PGO) collect_pgo "$request_id" ;;
     PING) reply_ok "$request_id" ;;
     *) reply_error "$request_id" UNKNOWN_COMMAND ;;
   esac

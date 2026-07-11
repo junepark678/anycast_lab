@@ -80,7 +80,9 @@ it('covers only the declared appliance build inputs', () => {
     'buildroot',
     'scripts/appliance-cache-key.mjs',
     'scripts/build-image.sh',
+    'scripts/pgo-profile-set.mjs',
     'scripts/verify-manifest.mjs',
+    'scripts/verify-optimized-daemons.sh',
     'versions.env',
   ]);
 });
@@ -92,7 +94,7 @@ it('keeps the checked-in Buildroot and Actions ccache policy enabled and bounded
     'utf8',
   );
   expect(defconfig).toMatch(/^BR2_CCACHE=y$/m);
-  expect(defconfig).toMatch(/^BR2_CCACHE_INITIAL_SETUP="--max-size=1G"$/m);
+  expect(defconfig).toMatch(/^BR2_CCACHE_INITIAL_SETUP="--max-size=3G"$/m);
   expect(defconfig).toMatch(/^BR2_CCACHE_USE_BASEDIR=y$/m);
 
   const workflow = await readFile(

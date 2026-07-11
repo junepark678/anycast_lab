@@ -1,4 +1,5 @@
 import type {
+  ApplianceKind,
   ApplianceInspectionSnapshot,
   ApplianceObservedEvent,
   ApplianceRuntimeDescriptor,
@@ -123,6 +124,20 @@ export interface NativeApplianceInspection {
   readonly nodeId: string;
   readonly descriptor: ApplianceRuntimeDescriptor;
   readonly snapshot: ApplianceInspectionSnapshot;
+}
+
+export interface NativePgoProfileFile {
+  readonly path: string;
+  readonly size: number;
+  readonly sha256: string;
+}
+
+/** Destructive profile export from one instrumented native router appliance. */
+export interface NativePgoProfileCollection {
+  readonly nodeId: string;
+  readonly kind: Extract<ApplianceKind, 'bird' | 'frr'>;
+  readonly archive: Uint8Array;
+  readonly files: readonly NativePgoProfileFile[];
 }
 
 export interface NativeLabEngineOptions {

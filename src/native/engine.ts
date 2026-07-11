@@ -8,6 +8,7 @@ import {
   type ApplianceRuntimeDescriptor,
 } from '../appliances/abi';
 import type { ApplianceRuntimeRegistry } from '../appliances/registry';
+import { isPgoCollectibleRuntime } from '../appliances/v86/runtime';
 import { SeededRandom } from '../core/scheduler';
 import type {
   LabInterface,
@@ -31,6 +32,7 @@ import type {
   NativeLabEngineState,
   NativeLabEvent,
   NativePacketCapture,
+  NativePgoProfileCollection,
   NativeProjectDiagnostic,
   NativeTerminalOpenOptions,
   NativeTerminalOutput,
@@ -399,6 +401,84 @@ export class NativeLabEngine {
   async readFile(nodeId: string, path: string) {
     this.#expectUsable();
     return this.#requireAppliance(nodeId).runtime.readFile(path);
+  }
+
+  /**
+   * End a PGO training run and collect every instrumented BIRD/FRR appliance.
+   * All router collection commands are started before any is awaited so one
+   * daemon's graceful shutdown cannot alter another daemon's training window.
+   */
+  async collectPgoProfiles(): Promise<readonly NativePgoProfileCollection[]> {
+    this.#expectState('running');
+    const targets = [...this.#appliances.entries()].filter(
+      ([, entry]) => entry.descriptor.kind === 'bird' || entry.descriptor.kind === 'frr',
+    );
+    if (targets.length === 0) throw new Error('Native lab has no BIRD or FRR appliances to collect');
+    for (const [nodeId, entry] of targets) {
+      if (!entry.active || entry.runtime.state !== 'running') {
+        throw new Error(`Native appliance ${nodeId} is not running and cannot export PGO profiles`);
+      }
+      if (!isPgoCollectibleRuntime(entry.runtime)) {
+        throw new Error(`Native runtime ${entry.descriptor.runtimeId} does not support PGO profile collection`);
+      }
+    }
+
+    this.#cancelTimer();
+    if (this.#options.autoRun) await this.#advanceFromWallClock();
+    this.#transition('stopping', 'Collecting native appliance PGO profiles');
+    for (const [, entry] of targets) {
+      entry.active = false;
+      entry.nextDeadlineNs = null;
+    }
+
+    const pending = targets.map(async ([nodeId, entry]): Promise<NativePgoProfileCollection> => {
+      // The preflight above narrows this structurally; repeat the guard to keep
+      // the capability local and avoid widening the generic appliance ABI.
+      if (!isPgoCollectibleRuntime(entry.runtime)) {
+        throw new Error(`Native runtime ${entry.descriptor.runtimeId} lost its PGO collection capability`);
+      }
+      const result = await entry.runtime.collectPgoProfiles();
+      if (entry.runtime.state !== 'stopped') {
+        throw new Error(`Native runtime ${entry.descriptor.runtimeId} returned profiles without stopping`);
+      }
+      return {
+        nodeId,
+        kind: entry.descriptor.kind as 'bird' | 'frr',
+        archive: result.archive.slice(),
+        files: result.files.map((file) => ({ ...file })),
+      };
+    });
+    const settled = await Promise.allSettled(pending);
+
+    const failures: unknown[] = settled.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : [],
+    );
+    const nonTargets = [...this.#appliances.values()].filter(
+      (entry) => !targets.some(([, target]) => target === entry),
+    );
+    const stopped = await Promise.allSettled(
+      nonTargets.map(async (entry) => {
+        if (entry.runtime.state === 'running') await entry.runtime.stop('PGO training complete');
+        entry.active = false;
+        entry.nextDeadlineNs = null;
+      }),
+    );
+    for (const result of stopped) {
+      if (result.status === 'rejected') failures.push(result.reason);
+    }
+    this.#pendingArrivals = [];
+
+    if (failures.length > 0) {
+      this.#transition('failed', 'One or more native appliances failed to export PGO profiles');
+      await this.#beginFailureCleanup('native PGO profile collection failed');
+      throw new AggregateError(failures, 'One or more native appliances failed to export PGO profiles');
+    }
+
+    this.#transition('stopped', 'Native appliance PGO profiles collected');
+    return settled.map((result) => {
+      if (result.status === 'rejected') throw result.reason;
+      return result.value;
+    });
   }
 
   async openTerminal(

@@ -3,9 +3,11 @@ export const PINNED_V86_COMMIT = '2f1346b0e7d88d4cbbbcc05fe15b4e369c3de23f' as c
 export const PINNED_BUILDROOT_VERSION = '2026.02.3' as const;
 export const PINNED_BIRD_VERSION = '2.15.1' as const;
 export const PINNED_FRR_VERSION = '10.5.1' as const;
-export const V86_IMAGE_BUILD_ID = 'anycastlab-v86-br2026.02.3-r1' as const;
+export const PINNED_LLVM_VERSION = '21.1.8' as const;
+export const V86_IMAGE_BUILD_ID = 'anycastlab-v86-br2026.02.3-r2' as const;
 
 export type V86ArtifactId = 'v86-wasm' | 'bios' | 'vga-bios' | 'bzimage';
+export type V86PgoMode = 'none' | 'generate' | 'use';
 
 export interface V86ArtifactManifestEntry {
   readonly id: V86ArtifactId;
@@ -30,6 +32,21 @@ export interface V86ArtifactManifest {
   readonly daemons: {
     readonly bird: typeof PINNED_BIRD_VERSION;
     readonly frr: typeof PINNED_FRR_VERSION;
+  };
+  readonly toolchain: {
+    readonly scope: 'bird-and-frr';
+    readonly compiler: 'clang';
+    readonly compilerVersion: typeof PINNED_LLVM_VERSION;
+    readonly linker: 'lld';
+    readonly optimization: 'O3';
+    readonly lto: 'thin';
+  };
+  readonly pgo: {
+    readonly mode: V86PgoMode;
+    readonly contextSha256: string;
+    readonly profileSetBuildKey: string | null;
+    readonly birdProfileSha256: string | null;
+    readonly frrProfileSha256: string | null;
   };
   readonly machine: {
     readonly memoryBytes: number;
@@ -148,6 +165,34 @@ export function parseV86ArtifactManifest(value: unknown): V86ArtifactManifest {
     throw new Error('The appliance daemon versions do not match the runtime descriptors');
   }
 
+  const toolchain = requireRecord(value.toolchain, 'toolchain');
+  if (
+    toolchain.scope !== 'bird-and-frr' ||
+    toolchain.compiler !== 'clang' ||
+    toolchain.compilerVersion !== PINNED_LLVM_VERSION ||
+    toolchain.linker !== 'lld' ||
+    toolchain.optimization !== 'O3' ||
+    toolchain.lto !== 'thin'
+  ) {
+    throw new Error('The appliance routing daemons do not use the pinned Clang O3 ThinLTO toolchain');
+  }
+
+  const pgo = requireRecord(value.pgo, 'pgo');
+  if (pgo.mode !== 'none' && pgo.mode !== 'generate' && pgo.mode !== 'use') {
+    throw new Error('Invalid v86 PGO mode');
+  }
+  if (typeof pgo.contextSha256 !== 'string') throw new Error('Invalid PGO context digest');
+  assertSha256('pgo.contextSha256', pgo.contextSha256);
+  const profileDigests = [pgo.profileSetBuildKey, pgo.birdProfileSha256, pgo.frrProfileSha256];
+  if (pgo.mode === 'use') {
+    for (const [index, digest] of profileDigests.entries()) {
+      if (typeof digest !== 'string') throw new Error('PGO use mode requires a complete profile identity');
+      assertSha256(`pgo.profileDigest.${index}`, digest);
+    }
+  } else if (profileDigests.some((digest) => digest !== null)) {
+    throw new Error('Only PGO use mode may identify optimized profiles');
+  }
+
   const machine = requireRecord(value.machine, 'machine');
   if (
     !isPositiveInteger(machine.memoryBytes) ||
@@ -189,6 +234,21 @@ export function parseV86ArtifactManifest(value: unknown): V86ArtifactManifest {
     buildroot: { version: PINNED_BUILDROOT_VERSION, sha256: buildroot.sha256 },
     v86: { packageVersion: PINNED_V86_PACKAGE_VERSION, commit: PINNED_V86_COMMIT },
     daemons: { bird: PINNED_BIRD_VERSION, frr: PINNED_FRR_VERSION },
+    toolchain: {
+      scope: 'bird-and-frr',
+      compiler: 'clang',
+      compilerVersion: PINNED_LLVM_VERSION,
+      linker: 'lld',
+      optimization: 'O3',
+      lto: 'thin',
+    },
+    pgo: {
+      mode: pgo.mode,
+      contextSha256: pgo.contextSha256,
+      profileSetBuildKey: pgo.profileSetBuildKey as string | null,
+      birdProfileSha256: pgo.birdProfileSha256 as string | null,
+      frrProfileSha256: pgo.frrProfileSha256 as string | null,
+    },
     machine: {
       memoryBytes: machine.memoryBytes,
       vgaMemoryBytes: machine.vgaMemoryBytes,

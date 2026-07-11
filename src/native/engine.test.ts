@@ -18,6 +18,7 @@ import {
   type ApplianceTerminalOpenRequest,
 } from '../appliances/abi';
 import { ApplianceRuntimeRegistry } from '../appliances/registry';
+import type { V86PgoProfileCollection } from '../appliances/v86/runtime';
 import { createEmptyProject, type LabLink, type LabNode, type LabProject } from '../core/types';
 import { NativeLabEngine, NativeProjectIneligibleError } from './engine';
 
@@ -425,6 +426,107 @@ describe('NativeLabEngine terminal, files, inspection, and node controls', () =>
   });
 });
 
+describe('NativeLabEngine PGO profile collection', () => {
+  it('starts BIRD and FRR collection concurrently, ignores clients, and stops the lab', async () => {
+    const bird = birdNode('bird', '02:00:00:00:10:01');
+    const frr = frrNode('frr', '02:00:00:00:10:02');
+    const client = clientNode('client');
+    const project = projectWith(
+      [bird, frr, client],
+      [link('bird-frr', bird, 0, frr, 0, 1)],
+    );
+    const harness = runtimeHarness();
+    const engine = new NativeLabEngine(project, harness.registry, { autoRun: false });
+    await engine.start();
+
+    const started: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    for (const nodeId of ['bird', 'frr'] as const) {
+      const runtime = harness.byNode.get(nodeId)!;
+      runtime.collectPgoProfiles = async () => {
+        started.push(nodeId);
+        await gate;
+        runtime.state = 'stopped';
+        runtime.host?.emitEvent({ type: 'lifecycle', state: 'stopped', detail: 'PGO profiles collected' });
+        return fakePgoCollection(nodeId);
+      };
+    }
+
+    let settled = false;
+    const pending = engine.collectPgoProfiles().finally(() => { settled = true; });
+    expect(started).toEqual(['bird', 'frr']);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    release();
+
+    const results = await pending;
+    expect(results.map((result) => ({
+      nodeId: result.nodeId,
+      kind: result.kind,
+      archive: [...result.archive],
+      paths: result.files.map((file) => file.path),
+    }))).toEqual([
+      { nodeId: 'bird', kind: 'bird', archive: [1], paths: ['/default_bird.profraw'] },
+      { nodeId: 'frr', kind: 'frr', archive: [2], paths: ['/default_frr.profraw'] },
+    ]);
+    expect(engine.state).toBe('stopped');
+    expect(harness.byNode.get('client')?.state).toBe('stopped');
+    await engine.dispose();
+  });
+
+  it('waits for every concurrent collector and fails the whole operation if one rejects', async () => {
+    const bird = birdNode('bird', '02:00:00:00:20:01');
+    const frr = frrNode('frr', '02:00:00:00:20:02');
+    const project = projectWith([bird, frr], [link('bird-frr', bird, 0, frr, 0, 1)]);
+    const harness = runtimeHarness();
+    const engine = new NativeLabEngine(project, harness.registry, { autoRun: false });
+    await engine.start();
+
+    const started: string[] = [];
+    let releaseFrr!: () => void;
+    const frrGate = new Promise<void>((resolve) => { releaseFrr = resolve; });
+    harness.byNode.get('bird')!.collectPgoProfiles = async () => {
+      started.push('bird');
+      throw new Error('bird profile export failed');
+    };
+    let frrCompleted = false;
+    harness.byNode.get('frr')!.collectPgoProfiles = async () => {
+      started.push('frr');
+      await frrGate;
+      frrCompleted = true;
+      harness.byNode.get('frr')!.state = 'stopped';
+      return fakePgoCollection('frr');
+    };
+
+    const pending = engine.collectPgoProfiles();
+    expect(started).toEqual(['bird', 'frr']);
+    await Promise.resolve();
+    expect(frrCompleted).toBe(false);
+    releaseFrr();
+
+    await expect(pending).rejects.toThrow(/One or more native appliances failed to export PGO profiles/);
+    expect(frrCompleted).toBe(true);
+    expect(engine.state).toBe('failed');
+    expect(harness.created.every((runtime) => runtime.state === 'disposed')).toBe(true);
+    await engine.dispose();
+  });
+
+  it('rejects runtimes without the optional capability before stopping the lab', async () => {
+    const bird = birdNode('bird', '02:00:00:00:30:01');
+    const frr = frrNode('frr', '02:00:00:00:30:02');
+    const project = projectWith([bird, frr], [link('bird-frr', bird, 0, frr, 0, 1)]);
+    const harness = runtimeHarness();
+    const engine = new NativeLabEngine(project, harness.registry, { autoRun: false });
+    await engine.start();
+
+    await expect(engine.collectPgoProfiles()).rejects.toThrow(/does not support PGO profile collection/);
+    expect(engine.state).toBe('running');
+    expect(harness.created.every((runtime) => runtime.state === 'running')).toBe(true);
+    await engine.dispose();
+  });
+});
+
 interface HarnessOptions {
   readonly synchronousTerminalGreeting?: string;
   readonly immediateForever?: boolean;
@@ -460,6 +562,7 @@ class FakeRuntime implements ApplianceRuntime {
   readonly terminalResizes: Array<{ sessionId: string; columns: number; rows: number }> = [];
   readonly closedTerminals: string[] = [];
   readonly files = new Map<string, ApplianceFile>();
+  collectPgoProfiles?: () => Promise<V86PgoProfileCollection>;
   startCalls = 0;
   #nextTerminal = 1;
 
@@ -597,6 +700,29 @@ function birdNode(id: string, mac = `02:00:00:00:00:${id === 'a' ? '01' : '02'}`
     interfaces: [{ id: 'uplink', name: 'eth0', mac, addresses: [], state: 'up', mtu: 1500 }],
     files: [{ path: '/etc/bird/bird.conf', content: 'router id 192.0.2.1;\n', entrypoint: true }],
     state: 'up',
+  };
+}
+
+function frrNode(id: string, mac: string): LabNode {
+  return {
+    id,
+    name: id,
+    kind: 'router',
+    appliance: { kind: 'frr', runtime: 'wasm', version: '10.5.1', entrypoint: '/etc/frr/frr.conf' },
+    interfaces: [{ id: 'uplink', name: 'eth0', mac, addresses: [], state: 'up', mtu: 1500 }],
+    files: [{ path: '/etc/frr/frr.conf', content: 'frr defaults traditional\n', entrypoint: true }],
+    state: 'up',
+  };
+}
+
+function fakePgoCollection(kind: 'bird' | 'frr'): V86PgoProfileCollection {
+  return {
+    archive: new Uint8Array([kind === 'bird' ? 1 : 2]),
+    files: [{
+      path: `/default_${kind}.profraw`,
+      size: 1,
+      sha256: (kind === 'bird' ? 'a' : 'b').repeat(64),
+    }],
   };
 }
 

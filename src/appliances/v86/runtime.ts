@@ -30,6 +30,7 @@ import {
   type V86ArtifactSource,
   type VerifiedV86ArtifactBundle,
   loadVerifiedV86Artifacts,
+  sha256Hex,
 } from './manifest';
 import { assertNormalizedAbsolutePath, createUstarArchive, readUstarArchive } from './tar';
 
@@ -39,6 +40,11 @@ const OUTPUT_ARCHIVE_PATH = '/anycastlab-out.tar';
 const CONTROL_PROTOCOL = 'ANYCASTLAB/1';
 const LAB_VLAN_BASE = 100;
 const MAX_SERIAL_BACKLOG = 64 * 1024;
+const MAX_PGO_RAW_PROFILE_BYTES = 64 * 1024 * 1024;
+const MAX_PGO_PROFILE_ARCHIVE_BYTES = MAX_PGO_RAW_PROFILE_BYTES + 1024 * 1024;
+const MAX_PGO_PROFILE_ENTRIES = 128;
+const TAR_BLOCK_SIZE = 512;
+const PGO_PROFILE_PATH = /^\/daemon-(bird|frr)_[A-Za-z0-9][A-Za-z0-9._-]*\.profraw$/;
 const encoder = new TextEncoder();
 
 export type V86ApplianceKind = Extract<ApplianceKind, 'bird' | 'frr' | 'client'>;
@@ -53,6 +59,32 @@ export interface V86ApplianceSnapshot {
   readonly interfaces: readonly ApplianceInterfaceSpec[];
 }
 
+export interface V86PgoProfileFile {
+  readonly path: string;
+  readonly size: number;
+  readonly sha256: string;
+}
+
+export interface V86PgoProfileCollection {
+  /** Byte-exact archive exported by the guest for host-side llvm-profdata. */
+  readonly archive: Uint8Array;
+  readonly files: readonly V86PgoProfileFile[];
+}
+
+/** Optional training-only extension; deliberately not part of the appliance ABI. */
+export interface PgoCollectibleRuntime {
+  collectPgoProfiles(): Promise<V86PgoProfileCollection>;
+}
+
+export function isPgoCollectibleRuntime(
+  runtime: ApplianceRuntime,
+): runtime is ApplianceRuntime & PgoCollectibleRuntime {
+  return (
+    (runtime.descriptor.kind === 'bird' || runtime.descriptor.kind === 'frr') &&
+    typeof (runtime as ApplianceRuntime & Partial<PgoCollectibleRuntime>).collectPgoProfiles === 'function'
+  );
+}
+
 export interface V86RuntimeDependencies {
   readonly artifactSource: V86ArtifactSource;
   readonly loadArtifacts?: (source: V86ArtifactSource) => Promise<VerifiedV86ArtifactBundle>;
@@ -62,6 +94,7 @@ export interface V86RuntimeDependencies {
   readonly revokeObjectUrl?: (url: string) => void;
   readonly bootTimeoutMs?: number;
   readonly controlTimeoutMs?: number;
+  readonly pgoCollectionTimeoutMs?: number;
 }
 
 interface ControlWaiter {
@@ -139,6 +172,7 @@ export class V86ApplianceRuntime implements ApplianceRuntime {
   #controlWaiters = new Map<string, ControlWaiter>();
   #nextControlId = 1;
   #controlTail: Promise<void> = Promise.resolve();
+  #pgoCollectionInProgress = false;
   #emulatorReady = deferred<void>();
   #guestReady = deferred<void>();
   #serialShellReady = deferred<void>();
@@ -383,6 +417,42 @@ export class V86ApplianceRuntime implements ApplianceRuntime {
     return cached === undefined ? null : copyFile(cached);
   }
 
+  /**
+   * Gracefully stop an instrumented router and export its raw LLVM profiles.
+   * This is a terminal training operation: the real daemon has exited before
+   * the guest acknowledges the command, and the emulator is stopped afterward.
+   */
+  async collectPgoProfiles(): Promise<V86PgoProfileCollection> {
+    const daemonKind = this.descriptor.kind;
+    if (daemonKind === 'client') {
+      throw new Error('PGO profile collection is only supported for BIRD and FRR appliances');
+    }
+    this.#expectState('running');
+    return this.#enqueueControl(async () => {
+      this.#expectState('running');
+      this.#pgoCollectionInProgress = true;
+      try {
+        await this.#sendControl(
+          'COLLECT_PGO',
+          [],
+          this.#dependencies.pgoCollectionTimeoutMs ?? 60_000,
+        );
+        const archive = await this.#requireEmulator().read_file(OUTPUT_ARCHIVE_PATH);
+        const files = await validatePgoProfileArchive(archive, daemonKind);
+        await this.#requireEmulator().stop();
+        this.#transition('stopped', 'PGO profiles collected');
+        return { archive: archive.slice(), files };
+      } catch (error) {
+        if (this.#state !== 'disposed' && this.#state !== 'failed') {
+          this.#transition('failed', `PGO profile collection failed: ${errorMessage(error)}`);
+        }
+        throw error;
+      } finally {
+        this.#pgoCollectionInProgress = false;
+      }
+    });
+  }
+
   async openTerminal(request: ApplianceTerminalOpenRequest): Promise<string> {
     this.#expectUsable();
     if (request.terminal !== 'serial') throw new Error(`Unsupported v86 terminal: ${request.terminal}`);
@@ -546,9 +616,12 @@ export class V86ApplianceRuntime implements ApplianceRuntime {
     this.#pendingInterfaceIds.clear();
   }
 
-  #sendControl(command: string, arguments_: readonly string[]): Promise<void> {
+  #sendControl(
+    command: string,
+    arguments_: readonly string[],
+    timeoutMs = this.#dependencies.controlTimeoutMs ?? 5_000,
+  ): Promise<void> {
     const id = String(this.#nextControlId++);
-    const timeoutMs = this.#dependencies.controlTimeoutMs ?? 5_000;
     const emulator = this.#requireEmulator();
     const promise = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -594,6 +667,10 @@ export class V86ApplianceRuntime implements ApplianceRuntime {
     }
     if (status === 'EXIT') {
       const reason = [id, ...detail].filter((value) => value !== undefined).join(' ') || 'appliance process exited';
+      if (this.#pgoCollectionInProgress) {
+        this.#emitLog('info', `Expected appliance exit during PGO collection: ${reason}`);
+        return;
+      }
       if (this.#state === 'running') this.#transition('failed', reason);
       else this.#emitLog('error', reason);
       return;
@@ -765,6 +842,14 @@ function createGuestStartScript(
     'ip link set lo up',
     'sysctl -q -w net.ipv4.ip_forward=1',
     'sysctl -q -w net.ipv6.conf.all.forwarding=1',
+    'if [ -f /etc/anycastlab/pgo-generate ]; then',
+    '  if [ -e /tmp/anycast-pgo ] || [ -L /tmp/anycast-pgo ]; then',
+    '    [ -d /tmp/anycast-pgo ] && [ ! -L /tmp/anycast-pgo ] || { echo "anycastlab: unsafe PGO profile directory" >&2; exit 1; }',
+    '  else',
+    '    mkdir /tmp/anycast-pgo',
+    '  fi',
+    '  chmod 1777 /tmp/anycast-pgo',
+    'fi',
   ];
   if (interfaces.length > 0) {
     lines.push(
@@ -793,6 +878,13 @@ function createGuestStartScript(
   lines.push('(');
   for (const [name, value] of Object.entries(boot.environment).sort(([left], [right]) => left.localeCompare(right))) {
     lines.push(`  export ${name}=${shellQuote(value)}`);
+  }
+  if (kind !== 'client') {
+    lines.push(
+      '  if [ -f /etc/anycastlab/pgo-generate ]; then',
+      `    export LLVM_PROFILE_FILE=${shellQuote(`/tmp/anycast-pgo/daemon-${kind}_%m_%p.profraw`)}`,
+      '  fi',
+    );
   }
   const command = [boot.entrypoint, ...boot.argv].map(shellQuote).join(' ');
   const readiness = kind === 'bird'
@@ -924,6 +1016,93 @@ function cleanSerialTail(bytes: Uint8Array): string {
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '')
     .trim();
+}
+
+async function validatePgoProfileArchive(
+  archive: Uint8Array,
+  kind: Exclude<V86ApplianceKind, 'client'>,
+): Promise<readonly V86PgoProfileFile[]> {
+  if (archive.byteLength > MAX_PGO_PROFILE_ARCHIVE_BYTES) {
+    throw new Error(
+      `PGO profile archive exceeds ${MAX_PGO_PROFILE_ARCHIVE_BYTES} bytes`,
+    );
+  }
+  assertBoundedUstarEntries(archive);
+  const entries = readUstarArchive(archive);
+  if (entries.length === 0) throw new Error('PGO profile archive contains no raw profiles');
+  if (entries.length > MAX_PGO_PROFILE_ENTRIES) {
+    throw new Error(`PGO profile archive contains more than ${MAX_PGO_PROFILE_ENTRIES} files`);
+  }
+
+  const paths = new Set<string>();
+  let totalBytes = 0;
+  const profiles: V86PgoProfileFile[] = [];
+  for (const entry of entries) {
+    if (!PGO_PROFILE_PATH.test(entry.path) || !entry.path.startsWith(`/daemon-${kind}_`)) {
+      throw new Error(`Unexpected PGO profile archive entry: ${entry.path}`);
+    }
+    if (paths.has(entry.path)) throw new Error(`Duplicate PGO profile archive entry: ${entry.path}`);
+    paths.add(entry.path);
+    if (entry.contents.byteLength === 0) throw new Error(`PGO raw profile is empty: ${entry.path}`);
+    totalBytes += entry.contents.byteLength;
+    if (totalBytes > MAX_PGO_RAW_PROFILE_BYTES) {
+      throw new Error(`PGO raw profiles exceed ${MAX_PGO_RAW_PROFILE_BYTES} bytes`);
+    }
+    profiles.push({
+      path: entry.path,
+      size: entry.contents.byteLength,
+      sha256: await sha256Hex(entry.contents),
+    });
+  }
+  return profiles.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+/** Preflight the full archive, including directory entries omitted by readUstarArchive. */
+function assertBoundedUstarEntries(archive: Uint8Array): void {
+  if (archive.byteLength < TAR_BLOCK_SIZE * 2 || archive.byteLength % TAR_BLOCK_SIZE !== 0) {
+    throw new Error('PGO profile archive is not a complete ustar archive');
+  }
+  let offset = 0;
+  let entries = 0;
+  while (offset + TAR_BLOCK_SIZE <= archive.byteLength) {
+    const header = archive.subarray(offset, offset + TAR_BLOCK_SIZE);
+    if (header.every((byte) => byte === 0)) {
+      if (offset + TAR_BLOCK_SIZE * 2 > archive.byteLength) {
+        throw new Error('PGO profile archive is missing its second end marker');
+      }
+      const trailer = archive.subarray(offset);
+      if (!trailer.every((byte) => byte === 0)) {
+        throw new Error('PGO profile archive contains data after its end marker');
+      }
+      return;
+    }
+    entries += 1;
+    if (entries > MAX_PGO_PROFILE_ENTRIES) {
+      throw new Error(`PGO profile archive contains more than ${MAX_PGO_PROFILE_ENTRIES} entries`);
+    }
+    const type = header[156];
+    if (type !== 0 && type !== 0x30) {
+      throw new Error('PGO profile archive contains a non-regular entry');
+    }
+    const size = readTarOctal(header.subarray(124, 136));
+    const payloadBlocks = Math.ceil(size / TAR_BLOCK_SIZE);
+    offset += TAR_BLOCK_SIZE + payloadBlocks * TAR_BLOCK_SIZE;
+    if (offset > archive.byteLength) throw new Error('PGO profile archive contains a truncated entry');
+  }
+  throw new Error('PGO profile archive has no end marker');
+}
+
+function readTarOctal(field: Uint8Array): number {
+  const value = new TextDecoder()
+    .decode(field)
+    .replace(/\0.*$/, '')
+    .trim();
+  if (!/^[0-7]+$/.test(value)) throw new Error('PGO profile archive has an invalid size field');
+  const parsed = Number.parseInt(value, 8);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error('PGO profile archive entry size is out of range');
+  }
+  return parsed;
 }
 
 function isUint8Array(value: unknown): value is Uint8Array {

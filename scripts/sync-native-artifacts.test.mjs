@@ -47,6 +47,13 @@ async function createBundle(directory) {
   }
   const manifestBytes = Buffer.from(`${JSON.stringify({
     ...PINNED_V86_MANIFEST_IDENTITY,
+    pgo: {
+      mode: 'use',
+      contextSha256: '1'.repeat(64),
+      profileSetBuildKey: '2'.repeat(64),
+      birdProfileSha256: '3'.repeat(64),
+      frrProfileSha256: '4'.repeat(64),
+    },
     machine: {
       memoryBytes: 128 * 1024 * 1024,
       vgaMemoryBytes: 2 * 1024 * 1024,
@@ -138,7 +145,7 @@ describe('sync-native-artifacts deployment modes', () => {
     });
 
     const status = JSON.parse(await readFile(resolve(output, 'status.json'), 'utf8'));
-    expect(status).toMatchObject({ nativeV86: true, buildId: 'anycastlab-v86-br2026.02.3-r1' });
+    expect(status).toMatchObject({ nativeV86: true, buildId: 'anycastlab-v86-br2026.02.3-r2' });
     await expect(access(resolve(output, 'v86/router-bzimage.bin'))).resolves.toBeUndefined();
     await expect(access(resolve(output, 'v86/not-deployed.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
   });

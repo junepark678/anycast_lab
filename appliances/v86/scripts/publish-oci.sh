@@ -63,7 +63,7 @@ if [[ ! $recorded_digest =~ ^[a-f0-9]{64}$ ]]; then
   printf 'Invalid appliance manifest digest\n' >&2
   exit 1
 fi
-verified_line=$(node "$ROOT/scripts/verify-manifest.mjs" "$MANIFEST_PATH")
+verified_line=$(node "$ROOT/scripts/verify-manifest.mjs" "$MANIFEST_PATH" --require-pgo-use)
 if [[ "$verified_line" != "$recorded_digest  manifest.json" ]]; then
   printf 'Appliance manifest.sha256 does not match the verified bundle\n' >&2
   exit 1

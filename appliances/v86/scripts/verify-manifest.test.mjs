@@ -33,6 +33,14 @@ async function fixture() {
   }
   const manifest = {
     ...PINNED_V86_MANIFEST_IDENTITY,
+    toolchain: { ...PINNED_V86_MANIFEST_IDENTITY.toolchain },
+    pgo: {
+      mode: 'use',
+      contextSha256: '1'.repeat(64),
+      profileSetBuildKey: '2'.repeat(64),
+      birdProfileSha256: '3'.repeat(64),
+      frrProfileSha256: '4'.repeat(64),
+    },
     machine: {
       memoryBytes: 128 * 1024 * 1024,
       vgaMemoryBytes: 2 * 1024 * 1024,
@@ -97,5 +105,32 @@ describe('verifyV86ArtifactBundle', () => {
     manifest.machine.trunkMtu = 1500;
     await writeFile(manifestPath, JSON.stringify(manifest));
     await expect(verifyV86ArtifactBundle(manifestPath)).rejects.toThrow('between 1504 and 65535');
+  });
+
+  it('requires pinned O3 ThinLTO and complete PGO-use provenance', async () => {
+    const { manifest, manifestPath } = await fixture();
+    manifest.toolchain.optimization = 'O2';
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await expect(verifyV86ArtifactBundle(manifestPath)).rejects.toThrow('toolchain metadata');
+
+    manifest.toolchain = { ...PINNED_V86_MANIFEST_IDENTITY.toolchain };
+    manifest.pgo.birdProfileSha256 = null;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await expect(verifyV86ArtifactBundle(manifestPath)).rejects.toThrow('birdProfileSha256');
+
+    manifest.pgo = {
+      mode: 'generate',
+      contextSha256: '1'.repeat(64),
+      profileSetBuildKey: '2'.repeat(64),
+      birdProfileSha256: null,
+      frrProfileSha256: null,
+    };
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await expect(verifyV86ArtifactBundle(manifestPath)).rejects.toThrow('Only PGO use mode');
+
+    manifest.pgo.profileSetBuildKey = null;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await expect(verifyV86ArtifactBundle(manifestPath, { requiredPgoMode: 'use' }))
+      .rejects.toThrow('requires PGO mode use');
   });
 });

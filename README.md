@@ -15,12 +15,14 @@ topology plus the exact appliance file tree; no account or backend is needed.
   documented BGP, OSPF, static, direct, route-server, IPv4, and IPv6 subset and
   produces guided per-hop traces. It never claims to execute an upstream
   daemon.
-- **NATIVE VM** runs the unmodified Buildroot packages for BIRD 2.15.1 and FRR
-  10.5.1 as native i686 Linux executables. The Linux guests run under the
-  pinned v86 WebAssembly emulator. Linux clients and services participate on
-  the same raw-Ethernet fabric, serial shells are interactive, and captures
-  export as PCAPNG. Native service nodes own addresses and answer kernel ICMP;
-  application servers are started explicitly from their serial shells.
+- **NATIVE VM** runs pinned Buildroot packages for BIRD 2.15.1 and FRR 10.5.1
+  as native i686 Linux executables. Release binaries use Clang 21, `-O3`,
+  ThinLTO, and profiles collected from the real BGP/OSPF native workload. The
+  Linux guests run under the pinned v86 WebAssembly emulator. Linux clients and
+  services participate on the same raw-Ethernet fabric, serial shells are
+  interactive, and captures export as PCAPNG. Native service nodes own
+  addresses and answer kernel ICMP; application servers are started explicitly
+  from their serial shells.
 
 Native mode has no compatibility fallback. Its selector is disabled when the
 verified VM image is not part of the deployment. Each guest is allocated 128
@@ -43,7 +45,9 @@ bun run build:v86-image
 bun run build
 ```
 
-The image build requires a normal Buildroot host toolchain. See
+The image build requires a normal Buildroot host toolchain and builds the
+pinned host-only LLVM suite on its first run, which can take substantially
+longer than later cached builds. See
 [`appliances/v86/README.md`](./appliances/v86/README.md) for the pinned inputs,
 artifact contract, and guest design. A normal build without those artifacts is
 still valid and publishes an explicit `nativeV86: false` runtime status.

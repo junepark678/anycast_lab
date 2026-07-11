@@ -30,6 +30,13 @@ beforeAll(async () => {
   }
   const manifestBytes = Buffer.from(`${JSON.stringify({
     ...PINNED_V86_MANIFEST_IDENTITY,
+    pgo: {
+      mode: 'use',
+      contextSha256: '1'.repeat(64),
+      profileSetBuildKey: '2'.repeat(64),
+      birdProfileSha256: '3'.repeat(64),
+      frrProfileSha256: '4'.repeat(64),
+    },
     machine: {
       memoryBytes: 134_217_728,
       vgaMemoryBytes: 2_097_152,
@@ -68,7 +75,7 @@ it('creates and validates an external release status from immutable inputs', asy
     generation: 7,
     manifestUrl: `https://assets.example/releases/${digest}/manifest.json`,
     manifestSha256: digest,
-    buildId: 'anycastlab-v86-br2026.02.3-r1',
+    buildId: 'anycastlab-v86-br2026.02.3-r2',
     memoryBytes: 134_217_728,
     publishedAt: '2026-07-11T00:00:00.000Z',
     sourceRevision: 'a'.repeat(40),

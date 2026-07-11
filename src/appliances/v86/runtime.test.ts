@@ -12,12 +12,18 @@ import {
   PINNED_BIRD_VERSION,
   PINNED_BUILDROOT_VERSION,
   PINNED_FRR_VERSION,
+  PINNED_LLVM_VERSION,
   PINNED_V86_COMMIT,
   PINNED_V86_PACKAGE_VERSION,
   V86_IMAGE_BUILD_ID,
   type VerifiedV86ArtifactBundle,
 } from './manifest';
-import { V86ApplianceRuntime, createV86RuntimeFactories, v86RuntimeDescriptor } from './runtime';
+import {
+  V86ApplianceRuntime,
+  createV86RuntimeFactories,
+  isPgoCollectibleRuntime,
+  v86RuntimeDescriptor,
+} from './runtime';
 import { createUstarArchive, readUstarArchive } from './tar';
 
 const text = (value: string): Uint8Array => new TextEncoder().encode(value);
@@ -68,6 +74,13 @@ describe('V86ApplianceRuntime', () => {
     expect(startScript).toContain('/usr/sbin/birdc show status');
     expect(startScript).toContain('kill -0 "$appliance_pid"');
     expect(startScript).toContain('appliance readiness probe timed out');
+    expect(startScript).toContain('if [ -f /etc/anycastlab/pgo-generate ]; then');
+    expect(startScript).toContain('[ ! -L /tmp/anycast-pgo ]');
+    expect(startScript).toContain('chmod 1777 /tmp/anycast-pgo');
+    expect(startScript).toContain("LLVM_PROFILE_FILE='/tmp/anycast-pgo/daemon-bird_%m_%p.profraw'");
+    expect(startScript.indexOf('chmod 1777 /tmp/anycast-pgo')).toBeLessThan(
+      startScript.indexOf("exec '/usr/sbin/bird'"),
+    );
     expect(runtime.state).toBe('initialized');
 
     await runtime.start();
@@ -230,6 +243,143 @@ describe('V86ApplianceRuntime', () => {
     expect(runtime.state).toBe('failed');
     await runtime.dispose();
   });
+
+  it('exports bounded raw PGO profiles, tolerates the expected daemon exit, and stops v86', async () => {
+    const fake = new FakeV86();
+    fake.emitExpectedExitDuringPgo = true;
+    fake.pgoArchive = createUstarArchive([
+      { path: '/daemon-bird_987654321_22.profraw', contents: new Uint8Array([0, 1, 2, 3, 255]) },
+      { path: '/daemon-bird_123456789_11.profraw', contents: new Uint8Array([9, 8, 7]) },
+    ]);
+    const events: ApplianceObservedEvent[] = [];
+    const runtime = new V86ApplianceRuntime('bird', {
+      artifactSource: { manifestUrl: '/manifest.json', manifestSha256: 'a'.repeat(64) },
+      loadArtifacts: async () => artifactBundle(),
+      emulatorFactory: fake.factory,
+      createObjectUrl: () => 'blob:v86-pgo',
+      revokeObjectUrl: () => undefined,
+      bootTimeoutMs: 500,
+      pgoCollectionTimeoutMs: 500,
+    });
+    const host = hostStub();
+    await runtime.initialize(bootRequest(), { ...host, emitEvent: (event) => events.push(event) });
+    await runtime.start();
+
+    expect(isPgoCollectibleRuntime(runtime)).toBe(true);
+    const collection = await runtime.collectPgoProfiles();
+
+    expect(fake.controlCommands.at(-1)).toMatch(/^ANYCASTLAB\/1 COLLECT_PGO \d+$/);
+    expect(collection.archive).not.toBe(fake.pgoArchive);
+    expect(collection.files).toEqual([
+      {
+        path: '/daemon-bird_123456789_11.profraw',
+        size: 3,
+        sha256: '06df4f7e1394f1c57cc6583fba4d8060a5a66f4f4771c14aeff6b9af8a28c9b3',
+      },
+      {
+        path: '/daemon-bird_987654321_22.profraw',
+        size: 5,
+        sha256: 'ff5d8507b6a72bee2debce2c0054798deaccdc5d8a1b945b6280ce8aa9cba52e',
+      },
+    ]);
+    expect(runtime.state).toBe('stopped');
+    expect(fake.running).toBe(false);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'lifecycle', state: 'stopped', detail: 'PGO profiles collected',
+    }));
+    expect(events).not.toContainEqual(expect.objectContaining({ type: 'lifecycle', state: 'failed' }));
+    await runtime.dispose();
+  });
+
+  it('fails closed on empty, unexpected, duplicate, and excessive PGO tar entries', async () => {
+    const invalidArchives = [
+      {
+        label: 'no profiles',
+        archive: createUstarArchive([]),
+        error: /contains no raw profiles/,
+      },
+      {
+        label: 'empty profile',
+        archive: createUstarArchive([{ path: '/daemon-frr_empty_1.profraw', contents: new Uint8Array() }]),
+        error: /raw profile is empty/,
+      },
+      {
+        label: 'nested profile',
+        archive: createUstarArchive([{ path: '/nested/daemon-frr_1_1.profraw', contents: new Uint8Array([1]) }]),
+        error: /non-regular entry/,
+      },
+      {
+        label: 'wrong daemon kind',
+        archive: createUstarArchive([{ path: '/daemon-bird_1_1.profraw', contents: new Uint8Array([1]) }]),
+        error: /Unexpected PGO profile archive entry/,
+      },
+      {
+        label: 'duplicate profile',
+        archive: createUstarArchive([
+          { path: '/daemon-frr_duplicate_1.profraw', contents: new Uint8Array([1]) },
+          { path: '/daemon-frr_duplicate_1.profraw', contents: new Uint8Array([2]) },
+        ]),
+        error: /Duplicate PGO profile archive entry/,
+      },
+      {
+        label: 'too many profiles',
+        archive: createUstarArchive(
+          Array.from({ length: 129 }, (_, index) => ({
+            path: `/daemon-frr_${index}_1.profraw`,
+            contents: new Uint8Array([index & 0xff]),
+          })),
+        ),
+        error: /more than 128 entries/,
+      },
+    ];
+
+    for (const invalid of invalidArchives) {
+      const fake = new FakeV86();
+      fake.pgoArchive = invalid.archive;
+      const runtime = new V86ApplianceRuntime('frr', {
+        artifactSource: { manifestUrl: '/manifest.json', manifestSha256: 'a'.repeat(64) },
+        loadArtifacts: async () => artifactBundle(),
+        emulatorFactory: fake.factory,
+        createObjectUrl: () => `blob:v86-pgo-${invalid.label}`,
+        revokeObjectUrl: () => undefined,
+        bootTimeoutMs: 500,
+        pgoCollectionTimeoutMs: 500,
+      });
+      await runtime.initialize(bootRequest(), hostStub());
+      await runtime.start();
+      await expect(runtime.collectPgoProfiles(), invalid.label).rejects.toThrow(invalid.error);
+      expect(runtime.state, invalid.label).toBe('failed');
+      await runtime.dispose();
+    }
+  });
+
+  it('transitions to failed when the guest rejects collection after initiating shutdown', async () => {
+    const fake = new FakeV86();
+    fake.emitExpectedExitDuringPgo = true;
+    fake.pgoControlError = 'PGO_EXPORT_FAILED';
+    const runtime = new V86ApplianceRuntime('bird', {
+      artifactSource: { manifestUrl: '/manifest.json', manifestSha256: 'a'.repeat(64) },
+      loadArtifacts: async () => artifactBundle(),
+      emulatorFactory: fake.factory,
+      createObjectUrl: () => 'blob:v86-pgo-error',
+      revokeObjectUrl: () => undefined,
+      bootTimeoutMs: 500,
+      pgoCollectionTimeoutMs: 500,
+    });
+    await runtime.initialize(bootRequest(), hostStub());
+    await runtime.start();
+
+    await expect(runtime.collectPgoProfiles()).rejects.toThrow(/PGO_EXPORT_FAILED/);
+    expect(runtime.state).toBe('failed');
+    await runtime.dispose();
+  });
+
+  it('does not advertise the optional PGO capability for client appliances', () => {
+    const runtime = new V86ApplianceRuntime('client', {
+      artifactSource: { manifestUrl: '/manifest.json', manifestSha256: 'a'.repeat(64) },
+    });
+    expect(isPgoCollectibleRuntime(runtime)).toBe(false);
+  });
 });
 
 class FakeV86 implements V86Emulator {
@@ -255,6 +405,11 @@ class FakeV86 implements V86Emulator {
   booted = false;
   startupControlLine = 'ANYCASTLAB/1 READY';
   emitShellPromptOnBoot = true;
+  pgoArchive: Uint8Array = createUstarArchive([
+    { path: '/daemon-bird_123456789_1.profraw', contents: new Uint8Array([1, 2, 3, 4]) },
+  ]);
+  pgoControlError: string | null = null;
+  emitExpectedExitDuringPgo = false;
 
   readonly factory: V86EmulatorFactory = (options) => {
     this.options = options;
@@ -353,6 +508,20 @@ class FakeV86 implements V86Emulator {
       }
       return;
     }
+    if (command === 'COLLECT_PGO') {
+      this.files.set('/anycastlab-out.tar', this.pgoArchive.slice());
+      queueMicrotask(() => {
+        const response = this.pgoControlError === null
+          ? `ANYCASTLAB/1 OK ${id}`
+          : `ANYCASTLAB/1 ERR ${id} ${this.pgoControlError}`;
+        this.emitControl(
+          this.emitExpectedExitDuringPgo
+            ? `ANYCASTLAB/1 EXIT appliance-process-exited\n${response}`
+            : response,
+        );
+      });
+      return;
+    }
     queueMicrotask(() => this.emitControl(`ANYCASTLAB/1 OK ${id}`));
   }
 
@@ -412,6 +581,21 @@ function artifactBundle(): VerifiedV86ArtifactBundle {
       },
       v86: { packageVersion: PINNED_V86_PACKAGE_VERSION, commit: PINNED_V86_COMMIT },
       daemons: { bird: PINNED_BIRD_VERSION, frr: PINNED_FRR_VERSION },
+      toolchain: {
+        scope: 'bird-and-frr',
+        compiler: 'clang',
+        compilerVersion: PINNED_LLVM_VERSION,
+        linker: 'lld',
+        optimization: 'O3',
+        lto: 'thin',
+      },
+      pgo: {
+        mode: 'use',
+        contextSha256: '4'.repeat(64),
+        profileSetBuildKey: '5'.repeat(64),
+        birdProfileSha256: '6'.repeat(64),
+        frrProfileSha256: '7'.repeat(64),
+      },
       machine: { memoryBytes: 256 * 1024 * 1024, vgaMemoryBytes: 2 * 1024 * 1024, trunkMtu: 65_535 },
       artifacts: [
         { id: 'v86-wasm', file: 'v86.wasm', size: 1, sha256: '0'.repeat(64) },

@@ -15,6 +15,21 @@
     "bird": "@BIRD_VERSION@",
     "frr": "@FRR_VERSION@"
   },
+  "toolchain": {
+    "scope": "bird-and-frr",
+    "compiler": "clang",
+    "compilerVersion": "@LLVM_VERSION@",
+    "linker": "lld",
+    "optimization": "O3",
+    "lto": "thin"
+  },
+  "pgo": {
+    "mode": "@PGO_MODE@",
+    "contextSha256": "@PGO_CONTEXT_SHA@",
+    "profileSetBuildKey": @PGO_PROFILE_SET_BUILD_KEY_JSON@,
+    "birdProfileSha256": @BIRD_PROFILE_SHA256_JSON@,
+    "frrProfileSha256": @FRR_PROFILE_SHA256_JSON@
+  },
   "machine": {
     "memoryBytes": 134217728,
     "vgaMemoryBytes": 2097152,

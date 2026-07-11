@@ -3,6 +3,26 @@ set -eu
 
 target_dir=$1
 
+case "${ANYCAST_PGO_MODE:-none}" in
+  generate)
+    install -d -m 0755 "$target_dir/etc/anycastlab"
+    marker="$target_dir/etc/anycastlab/pgo-generate"
+    temporary="$marker.tmp.$$"
+    trap 'rm -f "$temporary"' 0 1 2 15
+    printf '%s\n' 'llvm-ir-pgo-generate-v1' >"$temporary"
+    chmod 0444 "$temporary"
+    mv -f "$temporary" "$marker"
+    trap - 0 1 2 15
+    ;;
+  none|use)
+    rm -f "$target_dir/etc/anycastlab/pgo-generate"
+    ;;
+  *)
+    printf 'Unsupported ANYCAST_PGO_MODE in post-build: %s\n' "$ANYCAST_PGO_MODE" >&2
+    exit 1
+    ;;
+esac
+
 # The lab starts only the daemon selected by the node's native boot request.
 # Running FRR's default service in every image would race config injection and
 # conflict with BIRD nodes, since the image deliberately contains both suites.

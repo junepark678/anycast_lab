@@ -89,6 +89,7 @@ describe('native appliance boot mapping', () => {
     expect(fileText(boot.files, FRR_NATIVE_WRAPPER)).toBe(FRR_WRAPPER_SOURCE);
     expect(FRR_WRAPPER_SOURCE).toContain('/usr/libexec/anycastlab-frr start');
     expect(FRR_WRAPPER_SOURCE).toContain('/usr/libexec/anycastlab-frr stop');
+    expect(FRR_WRAPPER_SOURCE).toContain("trap 'exit 0' INT TERM");
     expect(FRR_WRAPPER_SOURCE).toContain('/usr/sbin/frrinit.sh status');
     expect(FRR_WRAPPER_SOURCE).toContain('touch /run/anycastlab/frr.ready');
     expect(FRR_WRAPPER_SOURCE).toContain('[ "$failures" -lt 3 ] || exit 1');

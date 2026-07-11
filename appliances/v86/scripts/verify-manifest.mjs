@@ -9,7 +9,7 @@ export const MAX_RELEASE_ARTIFACT_BYTES = 512 * 1024 * 1024;
 export const PINNED_V86_MANIFEST_IDENTITY = Object.freeze({
   schemaVersion: 1,
   imageId: 'anycast-lab-router',
-  buildId: 'anycastlab-v86-br2026.02.3-r1',
+  buildId: 'anycastlab-v86-br2026.02.3-r2',
   sourceDateEpoch: 1_781_643_617,
   buildroot: Object.freeze({
     version: '2026.02.3',
@@ -22,6 +22,14 @@ export const PINNED_V86_MANIFEST_IDENTITY = Object.freeze({
   daemons: Object.freeze({
     bird: '2.15.1',
     frr: '10.5.1',
+  }),
+  toolchain: Object.freeze({
+    scope: 'bird-and-frr',
+    compiler: 'clang',
+    compilerVersion: '21.1.8',
+    linker: 'lld',
+    optimization: 'O3',
+    lto: 'thin',
   }),
 });
 
@@ -63,7 +71,7 @@ function requirePowerOfTwo(value, label) {
  */
 export async function verifyV86ArtifactBundle(
   manifestInput,
-  { expectedManifestSha256, maxArtifactBytes = MAX_RELEASE_ARTIFACT_BYTES } = {},
+  { expectedManifestSha256, maxArtifactBytes = MAX_RELEASE_ARTIFACT_BYTES, requiredPgoMode } = {},
 ) {
   const manifestPath = resolve(manifestInput);
   const manifestBytes = await readFile(manifestPath);
@@ -109,6 +117,22 @@ export async function verifyV86ArtifactBundle(
     daemons.frr !== PINNED_V86_MANIFEST_IDENTITY.daemons.frr
   ) {
     throw new Error('Unexpected routing daemon release metadata');
+  }
+  const toolchain = requireRecord(manifest.toolchain, 'toolchain');
+  for (const [name, expected] of Object.entries(PINNED_V86_MANIFEST_IDENTITY.toolchain)) {
+    if (toolchain[name] !== expected) throw new Error('Unexpected routing daemon toolchain metadata');
+  }
+  const pgo = requireRecord(manifest.pgo, 'pgo');
+  if (!['none', 'generate', 'use'].includes(pgo.mode)) throw new Error('Invalid PGO mode');
+  requireSha256(pgo.contextSha256, 'pgo.contextSha256');
+  const profileFields = ['profileSetBuildKey', 'birdProfileSha256', 'frrProfileSha256'];
+  if (pgo.mode === 'use') {
+    for (const field of profileFields) requireSha256(pgo[field], `pgo.${field}`);
+  } else if (profileFields.some((field) => pgo[field] !== null)) {
+    throw new Error('Only PGO use mode may identify optimized profiles');
+  }
+  if (requiredPgoMode !== undefined && pgo.mode !== requiredPgoMode) {
+    throw new Error(`Native bundle requires PGO mode ${requiredPgoMode}; received ${pgo.mode}`);
   }
   const machine = requireRecord(manifest.machine, 'machine');
   const memoryBytes = requirePowerOfTwo(machine.memoryBytes, 'machine.memoryBytes');
@@ -167,8 +191,19 @@ export async function verifyV86ArtifactBundle(
   };
 }
 
+function requireSha256(value, label) {
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) {
+    throw new Error(`${label} must be a lowercase SHA-256 digest`);
+  }
+}
+
 const invokedPath = process.argv[1] === undefined ? undefined : pathToFileURL(resolve(process.argv[1])).href;
 if (invokedPath === import.meta.url) {
-  const result = await verifyV86ArtifactBundle(process.argv[2] ?? 'dist/manifest.json');
+  const arguments_ = process.argv.slice(2);
+  const requirePgoUse = arguments_.includes('--require-pgo-use');
+  const manifestPath = arguments_.find((value) => !value.startsWith('--')) ?? 'dist/manifest.json';
+  const result = await verifyV86ArtifactBundle(manifestPath, {
+    ...(requirePgoUse ? { requiredPgoMode: 'use' } : {}),
+  });
   process.stdout.write(`${result.manifestSha256}  manifest.json\n`);
 }

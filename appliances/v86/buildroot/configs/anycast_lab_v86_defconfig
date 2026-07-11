@@ -2,7 +2,7 @@ BR2_x86_pentiumpro=y
 BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
 BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_18=y
 BR2_CCACHE=y
-BR2_CCACHE_INITIAL_SETUP="--max-size=1G"
+BR2_CCACHE_INITIAL_SETUP="--max-size=3G"
 BR2_CCACHE_USE_BASEDIR=y
 BR2_GLOBAL_PATCH_DIR="board/qemu/patches"
 BR2_DOWNLOAD_FORCE_CHECK_HASHES=y
@@ -45,3 +45,8 @@ BR2_PACKAGE_FRR=y
 BR2_PACKAGE_FRR_BFD=y
 # BR2_PACKAGE_FRR_PROTOBUF is not set
 BR2_PACKAGE_LIBCAP=y
+# Target LLVM is intentionally absent. The external host-only suite compiles
+# BIRD/FRR against this image's GCC/glibc sysroot without entering the rootfs.
+# BR2_PACKAGE_LLVM is not set
+# BR2_PACKAGE_CLANG is not set
+# BR2_PACKAGE_COMPILER_RT is not set
