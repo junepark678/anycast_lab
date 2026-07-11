@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "imageId": "anycast-lab-router",
+  "buildId": "@IMAGE_BUILD_ID@",
+  "sourceDateEpoch": @SOURCE_DATE_EPOCH@,
+  "buildroot": {
+    "version": "@BUILDROOT_VERSION@",
+    "sha256": "@BUILDROOT_SHA256@"
+  },
+  "v86": {
+    "packageVersion": "@V86_NPM_VERSION@",
+    "commit": "@V86_COMMIT@"
+  },
+  "daemons": {
+    "bird": "@BIRD_VERSION@",
+    "frr": "@FRR_VERSION@"
+  },
+  "machine": {
+    "memoryBytes": 134217728,
+    "vgaMemoryBytes": 2097152,
+    "trunkMtu": 65535
+  },
+  "artifacts": [
+    {
+      "id": "v86-wasm",
+      "file": "v86.wasm",
+      "size": @V86_WASM_SIZE@,
+      "sha256": "@V86_WASM_OUTPUT_SHA256@"
+    },
+    {
+      "id": "bios",
+      "file": "seabios.bin",
+      "size": @SEABIOS_SIZE@,
+      "sha256": "@SEABIOS_OUTPUT_SHA256@"
+    },
+    {
+      "id": "vga-bios",
+      "file": "vgabios.bin",
+      "size": @VGABIOS_SIZE@,
+      "sha256": "@VGABIOS_OUTPUT_SHA256@"
+    },
+    {
+      "id": "bzimage",
+      "file": "router-bzimage.bin",
+      "size": @BZIMAGE_SIZE@,
+      "sha256": "@BZIMAGE_SHA256@"
+    }
+  ]
+}

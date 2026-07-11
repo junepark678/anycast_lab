@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "runtimeId": "bird-2.17.1-wasm",
+  "upstreamVersion": "2.17.1",
+  "hostAbiVersion": 1,
+  "nativeRunnable": false,
+  "registerByDefault": false,
+  "verifiedCapabilities": [],
+  "blockingMilestones": [
+    "cooperative BIRD event loop",
+    "virtual socket and poll backend",
+    "virtual interface and kernel route backend",
+    "in-memory birdc transport",
+    "end-to-end BGP and forwarding differential tests"
+  ]
+}

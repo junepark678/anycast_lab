@@ -1,0 +1,7 @@
+#!/bin/sh
+
+# Give the browser runtime an unambiguous terminal-readiness signal. Matching
+# a shell prompt is brittle because BusyBox changes it with cwd/profile state.
+printf '\r\nANYCASTLAB-SHELL-READY\r\n'
+cd /root 2>/dev/null || cd /
+exec /bin/sh

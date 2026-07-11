@@ -1,0 +1,95 @@
+#!/bin/sh
+set -u
+
+PROTOCOL=ANYCASTLAB/1
+HOST_MOUNT=/mnt/anycast-host
+INPUT="$HOST_MOUNT/anycastlab-in.tar"
+OUTPUT="$HOST_MOUNT/anycastlab-out.tar"
+
+reply_ok() { printf '%s OK %s\n' "$PROTOCOL" "$1"; }
+reply_error() { printf '%s ERR %s %s\n' "$PROTOCOL" "$1" "$2"; }
+
+monitor_appliance() {
+  [ -r /run/anycastlab/appliance.pid ] || return
+  pid=$(cat /run/anycastlab/appliance.pid)
+  while kill -0 "$pid" 2>/dev/null; do sleep 1; done
+  printf '%s EXIT appliance-process-exited\n' "$PROTOCOL"
+}
+
+[ -r /run/anycastlab/appliance.pid ] || {
+  printf '%s FAILED appliance-pid-missing\n' "$PROTOCOL"
+  exit 1
+}
+appliance_pid=$(cat /run/anycastlab/appliance.pid)
+kill -0 "$appliance_pid" 2>/dev/null || {
+  printf '%s FAILED appliance-process-exited\n' "$PROTOCOL"
+  exit 1
+}
+
+stty raw -echo 2>/dev/null || true
+monitor_appliance &
+printf '%s READY\n' "$PROTOCOL"
+
+while IFS= read -r line; do
+  set -- $line
+  [ "${1:-}" = "$PROTOCOL" ] || continue
+  command=${2:-}
+  request_id=${3:-missing}
+  argument=${4:-}
+
+  case "$command" in
+    APPLY)
+      if [ ! -f "$INPUT" ]; then
+        reply_error "$request_id" ENOENT
+      elif tar -tf "$INPUT" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+        reply_error "$request_id" UNSAFE_ARCHIVE
+      elif tar -xpf "$INPUT" -C /; then
+        sync
+        reply_ok "$request_id"
+      else
+        reply_error "$request_id" EXTRACT_FAILED
+      fi
+      ;;
+    READ)
+      path=$(printf '%s' "$argument" | base64 -d 2>/dev/null) || {
+        reply_error "$request_id" BAD_PATH
+        continue
+      }
+      case "$path" in
+        /*/../*|*/..|/*/./*|*/.|/)
+          reply_error "$request_id" BAD_PATH
+          ;;
+        /*)
+          if [ ! -e "$path" ]; then
+            reply_error "$request_id" ENOENT
+          elif tar -cpf "$OUTPUT" -C / ".${path}"; then
+            sync
+            reply_ok "$request_id"
+          else
+            reply_error "$request_id" EXPORT_FAILED
+          fi
+          ;;
+        *) reply_error "$request_id" BAD_PATH ;;
+      esac
+      ;;
+    LINK)
+      interface=$(printf '%s' "$argument" | base64 -d 2>/dev/null) || {
+        reply_error "$request_id" BAD_INTERFACE
+        continue
+      }
+      state=${5:-}
+      case "$state" in
+        up|down)
+          if ip link set dev "$interface" "$state"; then
+            reply_ok "$request_id"
+          else
+            reply_error "$request_id" LINK_FAILED
+          fi
+          ;;
+        *) reply_error "$request_id" BAD_STATE ;;
+      esac
+      ;;
+    PING) reply_ok "$request_id" ;;
+    *) reply_error "$request_id" UNKNOWN_COMMAND ;;
+  esac
+done

@@ -1,0 +1,8 @@
+node_modules/
+dist/
+public/runtime/
+playwright-report/
+test-results/
+coverage/
+*.tsbuildinfo
+.DS_Store
