@@ -87,7 +87,7 @@ code, pre { font-family: 'JetBrains Mono', monospace; }
 .panel-heading { display: flex; align-items: center; justify-content: space-between; min-height: 39px; padding: 0 12px; border-bottom: 1px solid var(--line); color: #dfe1e6; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .panel-heading small { color: var(--muted); font-size: 9px; font-weight: 500; letter-spacing: .02em; text-transform: none; }
 
-.palette { min-width: 0; border-right: 1px solid var(--line); background: var(--panel); }
+.palette { position: relative; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto; border-right: 1px solid var(--line); background: var(--panel); }
 .palette__items { display: flex; flex-direction: column; gap: 3px; padding: 8px; }
 .palette-item { display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; text-align: left; cursor: pointer; }
 .palette-item:hover { border-color: var(--line); background: var(--panel-raised); }
@@ -100,8 +100,6 @@ code, pre { font-family: 'JetBrains Mono', monospace; }
 .palette__license { position: absolute; bottom: 8px; left: 8px; display: flex; flex-direction: column; gap: 2px; color: #747b87; font-size: 8px; }
 .palette__license a { color: #9298a5; text-decoration: none; }
 .palette__license a:hover { color: var(--teal); }
-.palette { position: relative; }
-
 .topology-canvas { min-width: 0; min-height: 0; background: #0f1115; }
 .react-flow__background { background: radial-gradient(circle at 50% 25%, rgba(121,186,160,.04), transparent 42%); }
 .react-flow__controls { overflow: hidden; border: 1px solid var(--line) !important; border-radius: 6px !important; box-shadow: none !important; }

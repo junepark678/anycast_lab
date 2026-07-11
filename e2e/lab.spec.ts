@@ -20,6 +20,28 @@ test('runs the topology and traces the anycast service', async ({ page }) => {
   await expect(page.locator('.trace-hop').filter({ hasText: 'PoP · Seoul' })).toBeVisible();
 });
 
+test('keeps Packet trace clickable at the compact desktop height', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto('./');
+  await page.getByRole('button', { name: 'Run', exact: true }).click();
+  await expect(page.getByText(/Converged at/)).toBeVisible({ timeout: 10_000 });
+
+  const packetTrace = page.getByRole('button', { name: /Packet trace/ });
+  await expect(packetTrace).toBeVisible();
+  const centerIsUnobstructed = await packetTrace.evaluate((button) => {
+    const bounds = button.getBoundingClientRect();
+    const topmostElement = document.elementFromPoint(
+      bounds.left + bounds.width / 2,
+      bounds.top + bounds.height / 2,
+    );
+    return topmostElement !== null && button.contains(topmostElement);
+  });
+  expect(centerIsUnobstructed).toBe(true);
+
+  await packetTrace.click();
+  await expect(page.getByRole('button', { name: 'Trace packet' })).toBeVisible();
+});
+
 test('autosaves a project name to IndexedDB and restores it', async ({ page }) => {
   await page.goto('./');
   const name = page.getByRole('textbox', { name: 'Project name' });
