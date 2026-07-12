@@ -181,7 +181,8 @@ describe('Clang daemon optimization build contract', () => {
       supervisor.indexOf('if (strcmp(tokens[1], "COLLECT_PGO") == 0)'),
       supervisor.indexOf('response_error(request_id, "UNKNOWN_COMMAND"'),
     );
-    expect(collect.indexOf('stop_node(node, &error)'))
+    expect(collect).toContain('stop_node_with_grace(node, 1500U, &error)');
+    expect(collect.indexOf('stop_node_with_grace(node, 1500U, &error)'))
       .toBeLessThan(collect.indexOf('export_pgo_profiles(node, &error)'));
     expect(supervisor).toContain('kill(node->launcher_pid, SIGTERM)');
     expect(supervisor).toContain('valid_pgo_name(entry->d_name, node->config.kind)');

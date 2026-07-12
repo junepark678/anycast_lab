@@ -207,6 +207,33 @@ test('wire grammar, readiness, terminals, and PGO remain bounded and kind-aware'
   assert.match(sharedGuestContract, /nodes:\s*64/);
 });
 
+test('PGO shutdown lets the entrypoint flush daemons before supervisor namespace escalation', () => {
+  const signalStart = labd.indexOf('static void node_init_signal(');
+  const signalEnd = labd.indexOf('\nstatic ', signalStart + 1);
+  const namespaceStart = labd.indexOf('static int node_namespace_init(');
+  const namespaceEnd = labd.indexOf('\nstatic ', namespaceStart + 1);
+  const supervisorStopStart = labd.indexOf('static int stop_node_with_grace(');
+  const supervisorStopEnd = labd.indexOf('\nstatic ', supervisorStopStart + 1);
+  assert.ok(signalStart >= 0 && signalEnd > signalStart);
+  assert.ok(namespaceStart >= 0 && namespaceEnd > namespaceStart);
+  assert.ok(supervisorStopStart >= 0 && supervisorStopEnd > supervisorStopStart);
+  const signalHandler = labd.slice(signalStart, signalEnd);
+  const namespaceInit = labd.slice(namespaceStart, namespaceEnd);
+  const supervisorStop = labd.slice(supervisorStopStart, supervisorStopEnd);
+  const shutdownWait = namespaceInit.slice(namespaceInit.indexOf('while (!main_reaped)'));
+
+  assert.match(signalHandler, /kill\(init_main_pid, SIGTERM\)/);
+  assert.doesNotMatch(signalHandler, /kill\(-init_main_pid, SIGTERM\)/);
+  assert.doesNotMatch(shutdownWait, /SIGKILL|entrypoint_stop_attempts/);
+  assert.match(supervisorStop, /kill\(node->launcher_pid, SIGTERM\)/);
+  assert.match(supervisorStop, /wait_for_node_exit\(node, attempts\)/);
+  assert.match(supervisorStop, /kill\(node->launcher_pid, SIGKILL\)/);
+  assert.ok(supervisorStop.indexOf('SIGTERM') < supervisorStop.indexOf('wait_for_node_exit'));
+  assert.ok(supervisorStop.indexOf('wait_for_node_exit') < supervisorStop.indexOf('SIGKILL'));
+  assert.match(labd, /return stop_node_with_grace\(node, 60U, error\)/);
+  assert.match(labd, /stop_node_with_grace\(node, 1500U, &error\)/);
+});
+
 test('browser shared-guest limits stay in lockstep with anycast-labd', () => {
   const macros = {
     LABD_MAX_NODES: SHARED_GUEST_LIMITS.nodes,

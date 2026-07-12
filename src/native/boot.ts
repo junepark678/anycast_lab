@@ -73,7 +73,6 @@ start_session_file=/run/anycastlab/frr-start.pid
 start_session_tmp=/run/anycastlab/frr-start.pid.tmp
 start_pid=
 start_launcher_pid=
-stop_pid=
 umask 077
 rm -f /run/anycastlab/frr.ready "$failure_file" "$status_file" \
   "$start_output_file" "$start_output_pipe" "$start_done_file" "$start_done_tmp" \
@@ -112,6 +111,13 @@ terminate_start_job() {
   start_launcher_pid=
 }
 stop_daemons() {
+  if [ -e /etc/anycastlab/pgo-generate ]; then
+    /usr/libexec/anycastlab-frr stop >/dev/null 2>&1 || true
+    return
+  fi
+  # Keep spontaneous non-PGO health failures responsive. PGO collection uses
+  # the synchronous branch above so only the namespace supervisor owns its
+  # longer profile-flush deadline.
   /usr/libexec/anycastlab-frr stop >/dev/null 2>&1 &
   stop_pid=$!
   attempt=0

@@ -96,7 +96,9 @@ describe('native appliance boot mapping', () => {
     expect(DEFAULT_FRR_DAEMONS).toContain('ospfd=no');
     expect(fileText(boot.files, FRR_NATIVE_WRAPPER)).toBe(FRR_WRAPPER_SOURCE);
     expect(FRR_WRAPPER_SOURCE).toContain('/usr/libexec/anycastlab-frr start');
-    expect(FRR_WRAPPER_SOURCE).toContain('/usr/libexec/anycastlab-frr stop');
+    expect(FRR_WRAPPER_SOURCE).toContain('if [ -e /etc/anycastlab/pgo-generate ]; then');
+    expect(FRR_WRAPPER_SOURCE).toContain('/usr/libexec/anycastlab-frr stop >/dev/null 2>&1 || true');
+    expect(FRR_WRAPPER_SOURCE).toContain('while kill -0 "$stop_pid" 2>/dev/null && [ "$attempt" -lt 5 ]');
     expect(FRR_WRAPPER_SOURCE).toContain('[ "$start_elapsed" -lt 75 ]');
     expect(FRR_WRAPPER_SOURCE).toContain('readiness_attempts=$((90 - start_elapsed))');
     expect(FRR_WRAPPER_SOURCE).toContain('sleep 1');
@@ -172,6 +174,44 @@ describe('native appliance boot mapping', () => {
       ], { encoding: 'utf8' });
       expect(fallback).toBe('watchfrr cannot connect control socket is absent');
       expect(new TextEncoder().encode(fallback).byteLength).toBeLessThanOrEqual(128);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('waits for upstream FRR shutdown in PGO mode so the namespace supervisor owns the deadline', () => {
+    const directory = mkdtempSync(resolve(tmpdir(), 'anycast-frr-stop-wait-'));
+    try {
+      const helper = resolve(directory, 'frr-helper.sh');
+      const marker = resolve(directory, 'pgo-generate');
+      const completed = resolve(directory, 'completed');
+      const runner = resolve(directory, 'stop-daemons.sh');
+      writeFileSync(helper, `#!/bin/sh
+sleep 0.05
+: > ${shellPath(completed)}
+exit 7
+`, { mode: 0o755 });
+
+      const stopBody = FRR_WRAPPER_SOURCE.match(/stop_daemons\(\) \{\n([\s\S]*?)\n\}/)?.[1];
+      expect(stopBody).toBeDefined();
+      expect(stopBody).toMatch(/if \[ -e \/etc\/anycastlab\/pgo-generate \]; then\n\s+\/usr\/libexec\/anycastlab-frr stop >\/dev\/null 2>&1 \|\| true\n\s+return/);
+      expect(stopBody).toMatch(/\/usr\/libexec\/anycastlab-frr stop >\/dev\/null 2>&1 &/);
+      const source = `#!/bin/sh
+set -eu
+stop_daemons() {
+${stopBody}
+}
+stop_daemons
+`
+        .replaceAll('/etc/anycastlab/pgo-generate', marker)
+        .replaceAll('/usr/libexec/anycastlab-frr', helper);
+      writeFileSync(runner, source, { mode: 0o755 });
+      writeFileSync(marker, 'llvm-ir-pgo-generate-v1\n');
+
+      const result = spawnSync('sh', [runner], { encoding: 'utf8', timeout: 2_000 });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(readFileSync(completed, 'utf8')).toBe('');
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

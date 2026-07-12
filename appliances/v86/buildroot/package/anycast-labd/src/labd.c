@@ -889,10 +889,11 @@ static void node_init_signal(int signal_number)
 {
 	(void)signal_number;
 	init_main_exited = 1;
-	if (init_main_pid > 0) {
-		(void)kill(-init_main_pid, SIGTERM);
+	/* The entrypoint is the node session leader and owns graceful descendant
+	 * shutdown. In particular, FRR's wrapper must run its stop service before
+	 * the parent supervisor escalates by killing namespace PID 1. */
+	if (init_main_pid > 0)
 		(void)kill(init_main_pid, SIGTERM);
-	}
 }
 
 static void reset_child_signals(void)
@@ -1074,27 +1075,11 @@ static int node_namespace_init(void *opaque)
 	while (!main_reaped) {
 		pid_t child = waitpid(-1, &status, 0);
 
-		if (child < 0 && errno == EINTR) {
-			if (!init_main_exited)
-				continue;
-			for (unsigned int attempt = 0; attempt < 50U; attempt++) {
-				child = waitpid(main_pid, &status, WNOHANG);
-				if (child == main_pid) {
-					main_reaped = true;
-					break;
-				}
-				struct timespec delay = { .tv_sec = 0, .tv_nsec = 100000000L };
-				(void)nanosleep(&delay, NULL);
-			}
-			if (!main_reaped) {
-				(void)kill(-main_pid, SIGKILL);
-				(void)kill(main_pid, SIGKILL);
-				while (waitpid(main_pid, &status, 0) < 0 && errno == EINTR)
-					;
-				main_reaped = true;
-			}
+		/* The parent supervisor owns the stop deadline and kills namespace PID 1
+		 * if it expires. Waiting here lets the entrypoint finish its complete
+		 * daemon shutdown without a second, competing escalation timer. */
+		if (child < 0 && errno == EINTR)
 			continue;
-		}
 		if (child < 0) {
 			if (errno == ECHILD)
 				main_reaped = true;
