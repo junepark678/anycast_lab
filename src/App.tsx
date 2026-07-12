@@ -103,6 +103,10 @@ function appendRuntimeMessage(stream: 'system' | 'error', message: string): void
   }
 }
 
+function sameProjectRevision(first: LabProject, second: LabProject): boolean {
+  return first.id === second.id && first.updatedAt === second.updatedAt;
+}
+
 export default function App() {
   const store = useLabStore();
   const canvas = useMemo(() => projectCanvas(store.project, store.snapshot, store.running), [store.project, store.running, store.snapshot]);
@@ -113,6 +117,7 @@ export default function App() {
   const repositoryRef = useRef<ProjectRepository<LabProject> | null>(null);
   const autosaveRef = useRef<AutosaveCoordinator<LabProject> | null>(null);
   const engineRef = useRef<LabEngine | null>(null);
+  const simulationEngineSyncRef = useRef<Promise<LabEngine> | null>(null);
   const nativeEngineRef = useRef<NativeLabEngine | null>(null);
   const nativeRegistryRef = useRef<{ key: string; registry: ApplianceRuntimeRegistry } | null>(null);
   const nativeTerminalSessionsRef = useRef(new Map<string, Promise<NativeTerminalSession>>());
@@ -251,7 +256,7 @@ export default function App() {
     return registry;
   }, [nativeAvailability]);
 
-  const rebuildEngine = useCallback(async (project = store.project): Promise<LabEngine> => {
+  const rebuildEngine = useCallback(async (project: LabProject): Promise<LabEngine> => {
     await nativeEngineRef.current?.dispose();
     nativeEngineRef.current = null;
     setNativeProjectLocked(false);
@@ -262,7 +267,35 @@ export default function App() {
     const engine = await LabEngine.create(structuredClone(project));
     engineRef.current = engine;
     return engine;
-  }, [store.project]);
+  }, []);
+
+  const ensureSimulationEngine = useCallback(async (): Promise<LabEngine> => {
+    const pending = simulationEngineSyncRef.current;
+    if (pending !== null) return pending;
+
+    const operation = (async () => {
+      while (true) {
+        const project = useLabStore.getState().project;
+        let engine = engineRef.current;
+        if (!engine || !sameProjectRevision(engine.project, project)) {
+          engine = await rebuildEngine(project);
+        }
+        let snapshot = engine.snapshot();
+        if (!snapshot.converged) snapshot = await engine.converge();
+
+        const current = useLabStore.getState();
+        if (!sameProjectRevision(engine.project, current.project)) continue;
+        current.setSnapshot(snapshot);
+        return engine;
+      }
+    })();
+    simulationEngineSyncRef.current = operation;
+    try {
+      return await operation;
+    } finally {
+      if (simulationEngineSyncRef.current === operation) simulationEngineSyncRef.current = null;
+    }
+  }, [rebuildEngine]);
 
   const rebuildNativeEngine = useCallback(async (project = store.project): Promise<NativeLabEngine> => {
     await engineRef.current?.dispose();
@@ -349,7 +382,7 @@ export default function App() {
 
       store.setRunning(true);
       appendRuntimeMessage('system', 'Starting appliances and converging protocols…');
-      const engine = await rebuildEngine();
+      const engine = await rebuildEngine(store.project);
       await engine.converge();
       const snapshot = engine.snapshot();
       store.setSnapshot(snapshot);
@@ -435,12 +468,12 @@ export default function App() {
         await sendNativeCommand(node.id, command);
         return;
       }
-      const engine = engineRef.current ?? await rebuildEngine();
-      if (!store.snapshot) { await engine.converge(); store.setSnapshot(engine.snapshot()); }
+      const engine = await ensureSimulationEngine();
       const result = await engine.terminal(node.id, command);
+      store.setSnapshot(engine.snapshot());
       store.appendTerminal(node.id, result.exitCode === 0 ? 'output' : 'error', result.output || '(no output)');
     } catch (error) { store.appendTerminal(node.id, 'error', error instanceof Error ? error.message : String(error)); }
-  }, [consoleNode, rebuildEngine, runtimeMode, sendNativeCommand, store]);
+  }, [consoleNode, ensureSimulationEngine, runtimeMode, sendNativeCommand, store]);
 
   const runTrace = useCallback(async (sourceNodeId: string, destination: string) => {
     try {
@@ -453,13 +486,12 @@ export default function App() {
         setToast('Native traceroute started. Raw Ethernet frames are being captured for PCAPNG export.');
         return;
       }
-      const engine = engineRef.current ?? await rebuildEngine();
-      if (!store.snapshot) await engine.converge();
+      const engine = await ensureSimulationEngine();
       const result = engine.trace({ sourceNodeId, destination, protocol: 'icmp' });
       store.setTrace(result); store.setSnapshot(engine.snapshot());
       setToast(result.outcome === 'delivered' ? `Delivered in ${result.totalLatencyMs.toFixed(1)} ms.` : `Trace ended: ${result.outcome}.`);
     } catch (error) { setToast(error instanceof Error ? error.message : String(error)); }
-  }, [rebuildEngine, runtimeMode, sendNativeCommand, store]);
+  }, [ensureSimulationEngine, runtimeMode, sendNativeCommand, store]);
 
   const patchSelectedNode = useCallback((patch: Partial<LabNodeViewData>) => {
     if (!selectedNode) return;
