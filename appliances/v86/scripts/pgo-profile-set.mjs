@@ -16,6 +16,7 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
 import { computeApplianceCacheKey } from './appliance-cache-key.mjs';
+import { validateFilesystemMetadata } from './filesystem-layout.mjs';
 
 export const PGO_CONTEXT_SCHEMA_VERSION = 2;
 export const PGO_PROFILE_SET_SCHEMA_VERSION = 3;
@@ -691,6 +692,7 @@ function validateGenerateManifest(value, context) {
     'buildId',
     'buildroot',
     'daemons',
+    'filesystem',
     'imageId',
     'machine',
     'pgo',
@@ -705,6 +707,7 @@ function validateGenerateManifest(value, context) {
   if (value.buildId !== context.buildId) {
     throw new Error(`Instrumented manifest buildId must be ${context.buildId}`);
   }
+  validateFilesystemMetadata(value.filesystem);
   requireExactKeys(value.daemons, ['bird', 'frr'], 'instrumented manifest daemons');
   if (value.daemons.bird !== context.daemons.bird || value.daemons.frr !== context.daemons.frr) {
     throw new Error('Instrumented manifest daemon versions do not match the PGO context');

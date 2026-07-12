@@ -16,6 +16,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { APPLIANCE_CACHE_INPUTS } from './appliance-cache-key.mjs';
 import {
+  createFilesystemMetadata,
+  FILESYSTEM_LAYER_DEFINITIONS,
+} from './filesystem-layout.mjs';
+import {
   MAX_PGO_PROFILE_BYTES,
   MAX_PGO_ARCHIVE_BYTES,
   MAX_PGO_EVIDENCE_BYTES,
@@ -336,6 +340,14 @@ describe('archive merge command', () => {
       bird: birdArchiveBytes,
       frr: frrArchiveBytes,
     });
+    const artifactManifestTemplate = await readFile(
+      resolve(import.meta.dirname, '../artifact-manifest.template.json'),
+      'utf8',
+    );
+    const templateTopLevelKeys = [...artifactManifestTemplate.matchAll(/^ {2}"([^"]+)":/gm)]
+      .map((match) => match[1])
+      .sort();
+    expect(Object.keys(training.manifest).sort()).toEqual(templateTopLevelKeys);
 
     const merged = await mergePgoProfileArchives({
       root,
@@ -556,6 +568,26 @@ describe('archive merge command', () => {
       manifestSha256: digest(staleManifestBytes),
     }));
     await expect(merge()).rejects.toThrow(/context is stale/);
+
+    const missingFilesystem = structuredClone(harness.training.manifest);
+    delete missingFilesystem.filesystem;
+    const missingFilesystemBytes = Buffer.from(`${JSON.stringify(missingFilesystem)}\n`);
+    await writeFile(harness.training.manifestPath, missingFilesystemBytes);
+    await writeFile(harness.training.evidencePath, JSON.stringify({
+      ...harness.training.evidence,
+      manifestSha256: digest(missingFilesystemBytes),
+    }));
+    await expect(merge()).rejects.toThrow(/instrumented manifest has unexpected fields/);
+
+    const invalidFilesystem = structuredClone(harness.training.manifest);
+    invalidFilesystem.filesystem.cache.key = `sha256:${'0'.repeat(64)}`;
+    const invalidFilesystemBytes = Buffer.from(`${JSON.stringify(invalidFilesystem)}\n`);
+    await writeFile(harness.training.manifestPath, invalidFilesystemBytes);
+    await writeFile(harness.training.evidencePath, JSON.stringify({
+      ...harness.training.evidence,
+      manifestSha256: digest(invalidFilesystemBytes),
+    }));
+    await expect(merge()).rejects.toThrow(/filesystem\.cache\.key/);
   });
 
   it('rejects the wrong llvm-profdata version and malformed archives before sealing', async () => {
@@ -658,6 +690,13 @@ async function writeAllProfiles(directory, { omit = null, empty = null } = {}) {
 
 async function trainingMaterials(root, base, archives) {
   const context = await createPgoContext(root);
+  const filesystem = createFilesystemMetadata(FILESYSTEM_LAYER_DEFINITIONS.map(
+    ({ id }, index) => ({
+      id,
+      size: index + 1,
+      sha256: String(index + 1).repeat(64),
+    }),
+  ));
   const manifest = {
     schemaVersion: 1,
     imageId: 'anycast-lab-router',
@@ -682,6 +721,7 @@ async function trainingMaterials(root, base, archives) {
       frrProfileSha256: null,
     },
     machine: {},
+    filesystem,
     artifacts: [],
   };
   const manifestPath = resolve(base, 'instrumented-manifest.json');
