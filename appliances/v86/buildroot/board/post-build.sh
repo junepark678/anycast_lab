@@ -34,8 +34,12 @@ esac
 # Running FRR's default service in every image would race config injection and
 # conflict with BIRD nodes, since the image deliberately contains both suites.
 if [ -f "$target_dir/etc/init.d/S50frr" ]; then
-  cp "$target_dir/etc/init.d/S50frr" "$target_dir/usr/libexec/anycastlab-frr"
-  chmod 0755 "$target_dir/usr/libexec/anycastlab-frr"
+  # Buildroot removes empty target directories during finalization. The FRR
+  # package is the first retained owner of /usr/libexec in some clean builds,
+  # so recreate the destination instead of relying on an overlay placeholder.
+  install -d -m 0755 "$target_dir/usr/libexec"
+  install -m 0755 "$target_dir/etc/init.d/S50frr" \
+    "$target_dir/usr/libexec/anycastlab-frr"
   rm -f "$target_dir/etc/init.d/S50frr"
 fi
 

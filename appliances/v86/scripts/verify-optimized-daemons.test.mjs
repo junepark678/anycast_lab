@@ -456,6 +456,18 @@ describe('optimized daemon shell verifier', () => {
 });
 
 describe('post-build PGO marker', () => {
+  it('recreates a pruned libexec directory before installing the FRR launcher', async () => {
+    const fixture = await postBuildFixture();
+    await rm(resolve(fixture.target, 'usr/libexec'), { recursive: true });
+
+    await execFile('/bin/sh', [postBuild, fixture.target], {
+      env: postBuildEnvironment(fixture, 'none'),
+    });
+
+    await expect(readFile(resolve(fixture.target, 'usr/libexec/anycastlab-frr'), 'utf8'))
+      .resolves.toBe('#!/bin/sh\n');
+  });
+
   it.each([
     ['generate', true],
     ['none', false],

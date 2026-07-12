@@ -41,6 +41,14 @@ type NamespaceSnapshot = Readonly<Record<NamespaceKind, string>>;
 
 const browserDiagnostics = new WeakMap<Page, string[]>();
 
+function optionalNativeUnavailable(reason: string, required: boolean): string {
+  const message = `Native VM browser verification is unavailable: ${reason}`;
+  if (required) {
+    throw new Error(`${message} ANYCAST_LAB_REQUIRE_NATIVE=1 forbids skipping this verification.`);
+  }
+  return `${message} Skipping the optional native boot test.`;
+}
+
 test.beforeEach(async ({ page }) => {
   const messages: string[] = [];
   browserDiagnostics.set(page, messages);
@@ -75,8 +83,18 @@ test('keeps native guest probes within the interactive PTY input budget', () => 
   }
 });
 
+test('fails closed when an unavailable native runtime is required', () => {
+  expect(optionalNativeUnavailable('incompatible test image', false)).toContain(
+    'Skipping the optional native boot test',
+  );
+  expect(() => optionalNativeUnavailable('incompatible test image', true)).toThrow(
+    /ANYCAST_LAB_REQUIRE_NATIVE=1 forbids skipping/,
+  );
+});
+
 test('boots real BIRD and FRR namespaces, establishes BGP and OSPF, and forwards over the browser fabric', async ({ page }, testInfo) => {
   const collectPgo = process.env.ANYCAST_LAB_COLLECT_PGO === '1';
+  const requireNative = process.env.ANYCAST_LAB_REQUIRE_NATIVE === '1';
   test.setTimeout(collectPgo ? 900_000 : 360_000);
   await page.goto('./');
   const nativeStatus = await page.evaluate(async () => {
@@ -90,10 +108,20 @@ test('boots real BIRD and FRR namespaces, establishes BGP and OSPF, and forwards
     }
   });
   const pgoNativeIdentity = collectPgo ? requirePgoNativeIdentity(nativeStatus) : null;
-  if (nativeStatus === null && process.env.ANYCAST_LAB_REQUIRE_NATIVE === '1') {
-    throw new Error('Native VM artifacts are required for this test run but runtime/status.json reports none.');
+  if (nativeStatus === null) {
+    test.skip(true, optionalNativeUnavailable(
+      'runtime/status.json does not report a native v86 image.',
+      requireNative,
+    ));
   }
-  test.skip(nativeStatus === null, 'The optional native v86 image was not built for this test run.');
+
+  const nativeMode = page.getByRole('radio', { name: 'NATIVE VM' });
+  await expect(nativeMode).toBeVisible({ timeout: 15_000 });
+  if (await nativeMode.isDisabled()) {
+    const reason = (await nativeMode.getAttribute('title'))?.trim()
+      || 'the resolved native runtime is disabled by the UI';
+    test.skip(true, optionalNativeUnavailable(reason, requireNative));
+  }
   if (collectPgo) await installPgoBridge(page);
 
   const now = '2026-07-11T00:00:00.000Z';
@@ -241,7 +269,6 @@ ospfd_options="-A 127.0.0.1"
   await writeFile(archivePath, exportProjectArchive(project));
   await page.locator('input[type=file]').setInputFiles(archivePath);
   await expect(page.getByRole('status')).toContainText('Imported Native BIRD and FRR smoke test');
-  const nativeMode = page.getByRole('radio', { name: 'NATIVE VM' });
   await expect(nativeMode).toBeChecked();
   await expect(nativeMode).toBeEnabled();
 
