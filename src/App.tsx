@@ -40,7 +40,46 @@ const LAST_PROJECT_KEY = 'anycast-lab:last-project';
 const WORKSPACE_LAYOUT_KEY = 'anycast-lab:workspace-layout:v1';
 const EMBEDDED_WORKSPACE_LAYOUT_KEY = 'anycast-lab:guide-layout:v1';
 const GUIDE_FOCUS_TARGETS = new Set(['run', 'runtime', 'console', 'trace', 'topology', 'export']);
+const PGO_BRIDGE_ENABLED = import.meta.env.VITE_ANYCAST_LAB_PGO_BRIDGE === '1';
 const ConfigWorkspace = lazy(() => import('./app/components/ConfigWorkspace').then((module) => ({ default: module.ConfigWorkspace })));
+
+interface BrowserPgoBridgeEngine {
+  setLinkState(linkId: string, state: 'up' | 'down'): Promise<void>;
+  collectPgoProfiles(): ReturnType<NativeLabEngine['collectPgoProfiles']>;
+}
+
+interface BrowserPgoBridge {
+  enabled: true;
+  engine?: BrowserPgoBridgeEngine;
+  profiles?: unknown;
+}
+
+type PgoBridgeGlobal = typeof globalThis & { __anycastPgo?: BrowserPgoBridge };
+let attachedPgoEngine: NativeLabEngine | null = null;
+
+if (PGO_BRIDGE_ENABLED) {
+  (globalThis as PgoBridgeGlobal).__anycastPgo = { enabled: true };
+}
+
+function attachPgoBridgeEngine(engine: NativeLabEngine): void {
+  if (!PGO_BRIDGE_ENABLED) return;
+  const bridge = (globalThis as PgoBridgeGlobal).__anycastPgo;
+  if (bridge?.enabled !== true) {
+    throw new Error('The instrumented PGO bridge disappeared before native engine creation.');
+  }
+  attachedPgoEngine = engine;
+  bridge.engine = {
+    setLinkState: (linkId, state) => engine.setLinkState(linkId, state),
+    collectPgoProfiles: () => engine.collectPgoProfiles(),
+  };
+}
+
+function detachPgoBridgeEngine(engine: NativeLabEngine | null): void {
+  if (!PGO_BRIDGE_ENABLED || engine === null || attachedPgoEngine !== engine) return;
+  attachedPgoEngine = null;
+  const bridge = (globalThis as PgoBridgeGlobal).__anycastPgo;
+  if (bridge?.enabled === true) delete bridge.engine;
+}
 
 interface WorkspaceLayout {
   paletteCollapsed: boolean;
@@ -269,7 +308,10 @@ export default function App() {
       if (autosave !== null) void autosave.dispose({ flush: true }).finally(() => repository?.close());
       else repository?.close();
       void engineRef.current?.dispose();
-      void nativeEngineRef.current?.dispose();
+      const native = nativeEngineRef.current;
+      nativeEngineRef.current = null;
+      detachPgoBridgeEngine(native);
+      void native?.dispose();
     };
     // Store methods are stable; this intentionally runs once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -339,8 +381,10 @@ export default function App() {
   }, [nativeAvailability]);
 
   const rebuildEngine = useCallback(async (project: LabProject): Promise<LabEngine> => {
-    await nativeEngineRef.current?.dispose();
+    const native = nativeEngineRef.current;
     nativeEngineRef.current = null;
+    detachPgoBridgeEngine(native);
+    await native?.dispose();
     setNativeProjectLocked(false);
     nativeTerminalSessionsRef.current.clear();
     nativeTerminalDecodersRef.current.clear();
@@ -382,7 +426,10 @@ export default function App() {
   const rebuildNativeEngine = useCallback(async (project = store.project): Promise<NativeLabEngine> => {
     await engineRef.current?.dispose();
     engineRef.current = null;
-    await nativeEngineRef.current?.dispose();
+    const previousNative = nativeEngineRef.current;
+    nativeEngineRef.current = null;
+    detachPgoBridgeEngine(previousNative);
+    await previousNative?.dispose();
     nativeTerminalSessionsRef.current.clear();
     nativeTerminalDecodersRef.current.clear();
     nativeTerminalLineBuffersRef.current.clear();
@@ -424,6 +471,13 @@ export default function App() {
       },
     });
     nativeEngineRef.current = engine;
+    try {
+      attachPgoBridgeEngine(engine);
+    } catch (error) {
+      nativeEngineRef.current = null;
+      await engine.dispose();
+      throw error;
+    }
     return engine;
   }, [nativeRegistry, store.project]);
 
@@ -633,6 +687,7 @@ export default function App() {
     const native = nativeEngineRef.current;
     engineRef.current = null;
     nativeEngineRef.current = null;
+    detachPgoBridgeEngine(native);
     nativeTerminalSessionsRef.current.clear();
     nativeTerminalDecodersRef.current.clear();
     nativeTerminalLineBuffersRef.current.clear();

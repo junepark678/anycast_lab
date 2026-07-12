@@ -9,6 +9,7 @@ const workflowPath = resolve(
 );
 const workflow = await readFile(workflowPath, 'utf8');
 const nativeVmSpec = await readFile(resolve(import.meta.dirname, '../../../e2e/native-vm.spec.ts'), 'utf8');
+const appSource = await readFile(resolve(import.meta.dirname, '../../../src/App.tsx'), 'utf8');
 const applianceReadme = await readFile(resolve(import.meta.dirname, '../README.md'), 'utf8');
 const buildJob = job('build_test');
 const publishJob = job('publish');
@@ -43,6 +44,49 @@ describe('native v86 PGO publication workflow', () => {
     expect(optimized).toContain("grep -Eiq 'hash mismatch|Wbackend-plugin|profile is cold'");
     expect(step('Verify the optimized native bundle and profile provenance'))
       .toContain('manifest.pgo.profileSetBuildKey !== process.env.EXPECTED_PROFILE_BUILD_KEY');
+  });
+
+  it('enables the browser PGO bridge only in the instrumented lab build', () => {
+    const instrumentedLab = step('Build the instrumented lab');
+    expect(instrumentedLab).toContain("VITE_ANYCAST_LAB_PGO_BRIDGE: '1'");
+    expect(instrumentedLab).toContain('run: bun run build:required');
+
+    const finalLab = step('Build the final lab');
+    expect(finalLab).not.toContain('VITE_ANYCAST_LAB_PGO_BRIDGE');
+    const training = step('Train BIRD and FRR in the native browser lab');
+    expect(training).toContain("VITE_ANYCAST_LAB_PGO_BRIDGE: '1'");
+    expect(step('Run the final native browser test')).not.toContain('VITE_ANYCAST_LAB_PGO_BRIDGE');
+    expect(workflow.match(/VITE_ANYCAST_LAB_PGO_BRIDGE/g)).toHaveLength(2);
+
+    expect(appSource).toContain("import.meta.env.VITE_ANYCAST_LAB_PGO_BRIDGE === '1'");
+    expect(appSource).toMatch(/__anycastPgo\s*=\s*\{\s*enabled:\s*true/s);
+    expect(appSource).toContain('attachPgoBridgeEngine(engine)');
+    expect(appSource).toContain('detachPgoBridgeEngine(native)');
+    expect(appSource).toContain('bridge?.enabled !== true');
+    expect(appSource).toContain('delete bridge.engine');
+
+    const nativeEngineCreation = appSource.indexOf('const engine = new NativeLabEngine');
+    const bridgeAttachment = appSource.indexOf('attachPgoBridgeEngine(engine)', nativeEngineCreation);
+    expect(nativeEngineCreation).toBeGreaterThan(-1);
+    expect(appSource.match(/new NativeLabEngine/g)).toHaveLength(1);
+    expect(bridgeAttachment).toBeGreaterThan(nativeEngineCreation);
+    expect(appSource.indexOf('nativeEngineRef.current = engine', nativeEngineCreation))
+      .toBeLessThan(bridgeAttachment);
+    expect(nativeVmSpec).toContain("test('does not expose the CI-only PGO bridge in an ordinary build'");
+    expect(nativeVmSpec).toContain("Object.hasOwn(globalThis, '__anycastPgo')");
+  });
+
+  it('uses only the build-gated PGO bridge and fails closed when it is absent', () => {
+    expect(nativeVmSpec).not.toContain('/src/native/engine.ts');
+    expect(nativeVmSpec).not.toContain('src/native/engine.ts');
+    expect(nativeVmSpec).not.toMatch(/\bimport\s*\(/);
+
+    const bridge = sourceFunction(nativeVmSpec, 'async function installPgoBridge');
+    expect(bridge).toContain('__anycastPgo');
+    expect(bridge).toContain('enabled !== true');
+    expect(bridge).toMatch(/throw new Error\([^)]*PGO bridge/s);
+    expect(bridge).toContain('delete bridge.engine');
+    expect(bridge).toContain('delete bridge.profiles');
   });
 
   it('restores only an exact trusted master profile set and trains every cache miss, including tags', () => {
@@ -228,4 +272,11 @@ function stepIndex(name) {
 
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function sourceFunction(source, declaration) {
+  const start = source.indexOf(declaration);
+  if (start < 0) throw new Error(`Source function is missing: ${declaration}`);
+  const next = source.indexOf('\nasync function ', start + declaration.length);
+  return source.slice(start, next < 0 ? source.length : next);
 }

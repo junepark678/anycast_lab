@@ -92,6 +92,15 @@ test('fails closed when an unavailable native runtime is required', () => {
   );
 });
 
+test('does not expose the CI-only PGO bridge in an ordinary build', async ({ page }) => {
+  test.skip(
+    process.env.ANYCAST_LAB_COLLECT_PGO === '1',
+    'The instrumented training build intentionally exposes the PGO bridge.',
+  );
+  await page.goto('./');
+  await expect.poll(() => page.evaluate(() => Object.hasOwn(globalThis, '__anycastPgo'))).toBe(false);
+});
+
 test('boots real BIRD and FRR namespaces, establishes BGP and OSPF, and forwards over the browser fabric', async ({ page }, testInfo) => {
   const collectPgo = process.env.ANYCAST_LAB_COLLECT_PGO === '1';
   const requireNative = process.env.ANYCAST_LAB_REQUIRE_NATIVE === '1';
@@ -793,6 +802,7 @@ function requirePgoNativeIdentity(status: NativeRuntimeStatus | null): PgoNative
 }
 
 interface PgoBridge {
+  enabled?: true;
   engine?: {
     setLinkState(linkId: string, state: 'up' | 'down'): Promise<void>;
     collectPgoProfiles(): Promise<Array<{
@@ -811,20 +821,13 @@ interface PgoBridge {
 }
 
 async function installPgoBridge(page: Page): Promise<void> {
-  await page.evaluate(async () => {
-    const moduleUrl = new URL('src/native/engine.ts', document.baseURI).href;
-    const nativeModule = await import(/* @vite-ignore */ moduleUrl) as {
-      NativeLabEngine: { prototype: { start(): Promise<void> } };
-    };
-    const prototype = nativeModule.NativeLabEngine.prototype;
-    const originalStart = prototype.start;
-    (globalThis as typeof globalThis & { __anycastPgo?: PgoBridge }).__anycastPgo = {};
-    prototype.start = async function patchedStart(this: PgoBridge['engine']): Promise<void> {
-      const bridge = (globalThis as typeof globalThis & { __anycastPgo?: PgoBridge }).__anycastPgo;
-      if (bridge === undefined) throw new Error('PGO bridge disappeared before native startup');
-      bridge.engine = this;
-      return originalStart.call(this);
-    };
+  await page.evaluate(() => {
+    const bridge = (globalThis as typeof globalThis & { __anycastPgo?: PgoBridge }).__anycastPgo;
+    if (bridge?.enabled !== true) {
+      throw new Error('The lab was not built with the instrumented PGO bridge enabled.');
+    }
+    delete bridge.engine;
+    delete bridge.profiles;
   });
 }
 

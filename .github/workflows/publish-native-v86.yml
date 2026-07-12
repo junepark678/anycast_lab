@@ -215,6 +215,8 @@ jobs:
 
       - name: Build the instrumented lab
         if: steps.pgo_profile_cache.outputs.cache-hit != 'true'
+        env:
+          VITE_ANYCAST_LAB_PGO_BRIDGE: '1'
         run: bun run build:required
 
       - name: Train BIRD and FRR in the native browser lab
@@ -224,6 +226,7 @@ jobs:
           ANYCAST_LAB_REQUIRE_NATIVE: '1'
           ANYCAST_LAB_COLLECT_PGO: '1'
           ANYCAST_LAB_PGO_RAW_DIR: ${{ env.PGO_RAW_DIR }}
+          VITE_ANYCAST_LAB_PGO_BRIDGE: '1'
         run: bunx playwright test e2e/native-vm.spec.ts
 
       - name: Merge and seal the trained PGO profiles
