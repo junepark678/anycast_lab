@@ -33,6 +33,75 @@ test('routes commands and scrollback to independent appliance consoles', async (
   await expect(output).toContainText('BGP router identifier');
 });
 
+test('reconverges simulator routing tables after a live interface edit without reloading', async ({ page }) => {
+  await page.goto('./');
+  await page.getByRole('button', { name: 'Run', exact: true }).click();
+  await expect(page.getByText(/Converged at/)).toBeVisible({ timeout: 10_000 });
+
+  const consolePicker = page.getByRole('combobox', { name: 'Console appliance' });
+  const command = page.getByRole('textbox', { name: 'Terminal command' });
+  const routeTables = page.locator('.console-panel .terminal-line--output');
+
+  await consolePicker.selectOption('transit');
+  await command.fill('show route');
+  await command.press('Enter');
+  await expect(routeTables.last()).toContainText(/203\.0\.113\.53\/32\s+via 192\.0\.2\.1/);
+
+  await page.locator('html').evaluate((element) => element.setAttribute('data-no-reload', 'true'));
+  await page.getByTestId('rf__node-pop-seoul').click();
+  const addresses = page.locator('.inspector').getByRole('textbox', { name: 'eth0 addresses' });
+  await addresses.fill('192.0.2.3/31');
+  await expect(addresses).toHaveValue('192.0.2.3/31');
+
+  await consolePicker.selectOption('transit');
+  await page.getByRole('button', { name: 'Clear console' }).click();
+  await command.fill('show route');
+  await command.press('Enter');
+
+  const updatedTable = routeTables.last();
+  await expect(updatedTable).toContainText(/203\.0\.113\.53\/32\s+via 198\.51\.100\.1/);
+  await expect(updatedTable).not.toContainText(/203\.0\.113\.53\/32\s+via 192\.0\.2\.1/);
+  await expect(page.locator('html')).toHaveAttribute('data-no-reload', 'true');
+});
+
+test('propagates a live BIRD anycast prefix edit across simulator routing tables without reloading', async ({ page }) => {
+  await page.goto('./');
+  await page.getByRole('button', { name: 'Run', exact: true }).click();
+  await expect(page.getByText(/Converged at/)).toBeVisible({ timeout: 10_000 });
+
+  const consolePicker = page.getByRole('combobox', { name: 'Console appliance' });
+  const command = page.getByRole('textbox', { name: 'Terminal command' });
+  const routeTables = page.locator('.console-panel .terminal-line--output');
+
+  await consolePicker.selectOption('transit');
+  await command.fill('show route');
+  await command.press('Enter');
+  await expect(routeTables.last()).toContainText(/203\.0\.113\.53\/32\s+via 192\.0\.2\.1/);
+
+  await page.locator('html').evaluate((element) => element.setAttribute('data-no-reload', 'true'));
+  await page.getByTestId('rf__node-pop-seoul').click();
+  await page.getByRole('button', { name: 'Open native configuration' }).click();
+  const config = page.getByRole('textbox', { name: '/etc/bird/bird.conf contents' });
+  const original = await config.inputValue();
+  expect(original).toContain('define ANYCAST_PREFIX = 203.0.113.53/32;');
+  await config.fill(original.replace(
+    'define ANYCAST_PREFIX = 203.0.113.53/32;',
+    'define ANYCAST_PREFIX = 203.0.113.54/32;',
+  ));
+  await expect(config).toHaveValue(/define ANYCAST_PREFIX = 203\.0\.113\.54\/32;/);
+
+  await consolePicker.selectOption('transit');
+  await page.getByRole('button', { name: 'Clear console' }).click();
+  await command.fill('show route');
+  await command.press('Enter');
+
+  const updatedTable = routeTables.last();
+  await expect(updatedTable).toContainText(/203\.0\.113\.53\/32\s+via 198\.51\.100\.1/);
+  await expect(updatedTable).toContainText(/203\.0\.113\.54\/32\s+via 192\.0\.2\.1/);
+  await expect(updatedTable).not.toContainText(/203\.0\.113\.53\/32\s+via 192\.0\.2\.1/);
+  await expect(page.locator('html')).toHaveAttribute('data-no-reload', 'true');
+});
+
 test('drags a palette appliance to the exact canvas drop point', async ({ page }) => {
   await page.goto('./');
 
