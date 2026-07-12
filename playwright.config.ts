@@ -8,8 +8,9 @@ export default defineConfig({
   use: { baseURL: 'http://127.0.0.1:4173/lab/', trace: 'on-first-retry' },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
-    command: 'bun run dev --host 127.0.0.1 --port 4173',
+    command: './node_modules/.bin/tsc -b --pretty false && ./node_modules/.bin/vite build && ./node_modules/.bin/vite preview --host 127.0.0.1 --port 4173',
     url: 'http://127.0.0.1:4173/lab/',
-    reuseExistingServer: !process.env.CI,
+    timeout: 120_000,
+    reuseExistingServer: false,
   },
 });

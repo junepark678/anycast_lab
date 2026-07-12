@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title description">
+  <title id="title">Anycast Lab</title>
+  <desc id="description">Four network nodes routing toward a central anycast service</desc>
+  <defs>
+    <linearGradient id="background" x1="48" y1="24" x2="464" y2="488" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#20232a"/>
+      <stop offset="1" stop-color="#101114"/>
+    </linearGradient>
+    <linearGradient id="service" x1="207" y1="200" x2="313" y2="312" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#87e9dc"/>
+      <stop offset="1" stop-color="#3ab8aa"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#background)"/>
+  <g fill="none" stroke="#77808f" stroke-linecap="round" stroke-width="17">
+    <path d="M151 151 225 225M361 151l-74 74M151 361l74-74M361 361l-74-74"/>
+  </g>
+  <g fill="#9eb1cc" stroke="#d5deea" stroke-width="8">
+    <circle cx="143" cy="143" r="38"/>
+    <circle cx="369" cy="143" r="38"/>
+    <circle cx="143" cy="369" r="38"/>
+    <circle cx="369" cy="369" r="38"/>
+  </g>
+  <path d="m256 190 66 66-66 66-66-66 66-66Z" fill="url(#service)" stroke="#c7fff7" stroke-width="9"/>
+  <path d="M234 256h45m-16-16 16 16-16 16" fill="none" stroke="#102624" stroke-linecap="round" stroke-linejoin="round" stroke-width="13"/>
+</svg>

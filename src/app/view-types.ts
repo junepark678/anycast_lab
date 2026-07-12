@@ -14,6 +14,7 @@ export interface LabNodeViewData extends Record<string, unknown> {
   label: string;
   kind: NodeKind;
   location?: string;
+  enabled: boolean;
   status: 'stopped' | 'starting' | 'running' | 'failed';
   runtime: RuntimeProvenance;
   runtimeLabel: string;
