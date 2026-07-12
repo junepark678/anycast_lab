@@ -115,7 +115,7 @@ async function optimizedFixture(mode) {
     await writeFile(resolve(directory, 'config.log'), [
       `CC='${output}/host/bin/clang --target=i686-buildroot-linux-gnu --sysroot=${output}/host/i686-buildroot-linux-gnu/sysroot --gcc-install-dir=${output}/host/lib/gcc/i686-buildroot-linux-gnu/14.3.0 --ld-path=${output}/host/bin/ld.lld'`,
       "CFLAGS='-march=pentiumpro -O3 -flto=thin'",
-      "LDFLAGS='-O3 -flto=thin -fuse-ld=lld'",
+      "LDFLAGS='-O3 -flto=thin -fuse-ld=lld -Wl,-z,pack-relative-relocs'",
     ].join('\n'));
   }
   const files = [
@@ -223,6 +223,22 @@ describe('optimized daemon shell verifier', () => {
     const path = resolve(fixture.output, 'build/bird-2.15.1/config.log');
     await writeFile(path, (await readFile(path, 'utf8')).replaceAll('-O3', '-O2'));
     await expect(runVerifier(fixture, 'none')).rejects.toMatchObject({ stderr: expect.stringContaining('-O3') });
+  });
+
+  it('requires DT_RELR packing, executable PIE, and target provenance stripping', async () => {
+    const missingRelr = await optimizedFixture('none');
+    await expect(runVerifier(missingRelr, 'none', { FAKE_NO_RELR_FILE: 'bird' }))
+      .rejects.toMatchObject({ stderr: expect.stringContaining('packed relative relocation') });
+
+    const nonPie = await optimizedFixture('none');
+    await expect(runVerifier(nonPie, 'none', { FAKE_NON_PIE_FILE: 'birdc' }))
+      .rejects.toBeTruthy();
+
+    const commandLeak = await optimizedFixture('use');
+    await addEvidence(commandLeak, 'target/usr/sbin/ospfd', 'command-section');
+    await expect(runVerifier(commandLeak, 'use')).rejects.toMatchObject({
+      stderr: expect.stringContaining('retains Clang command-line provenance'),
+    });
   });
 
   it.each(['generate', 'use'])('rejects package-wide %s flags that would profile unselected ELFs', async (mode) => {
@@ -445,16 +461,18 @@ describe('post-build PGO marker', () => {
     ['none', false],
     ['use', false],
   ])('applies mode %s with marker=%s', async (mode, expected) => {
-    const target = await postBuildFixture();
-    await execFile('/bin/sh', [postBuild, target], { env: { ...process.env, ANYCAST_PGO_MODE: mode } });
+    const fixture = await postBuildFixture();
+    const { target } = fixture;
+    await execFile('/bin/sh', [postBuild, target], { env: postBuildEnvironment(fixture, mode) });
     const marker = resolve(target, 'etc/anycastlab/pgo-generate');
     if (expected) await expect(readFile(marker, 'utf8')).resolves.toBe('llvm-ir-pgo-generate-v1\n');
     else await expect(readFile(marker)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('replaces an existing read-only generate marker on repeated builds', async () => {
-    const target = await postBuildFixture();
-    const environment = { ...process.env, ANYCAST_PGO_MODE: 'generate' };
+    const fixture = await postBuildFixture();
+    const { target } = fixture;
+    const environment = postBuildEnvironment(fixture, 'generate');
     await execFile('/bin/sh', [postBuild, target], { env: environment });
     await execFile('/bin/sh', [postBuild, target], { env: environment });
     await expect(readFile(resolve(target, 'etc/anycastlab/pgo-generate'), 'utf8'))
@@ -462,9 +480,9 @@ describe('post-build PGO marker', () => {
   });
 
   it('fails closed for an unknown mode', async () => {
-    const target = await postBuildFixture();
-    await expect(execFile('/bin/sh', [postBuild, target], {
-      env: { ...process.env, ANYCAST_PGO_MODE: 'surprise' },
+    const fixture = await postBuildFixture();
+    await expect(execFile('/bin/sh', [postBuild, fixture.target], {
+      env: postBuildEnvironment(fixture, 'surprise'),
     })).rejects.toMatchObject({ stderr: expect.stringContaining('Unsupported ANYCAST_PGO_MODE') });
   });
 });
@@ -472,19 +490,39 @@ describe('post-build PGO marker', () => {
 async function postBuildFixture() {
   const base = await mkdtemp(resolve(tmpdir(), 'anycast-post-build-'));
   temporaryDirectories.push(base);
+  const target = resolve(base, 'target');
+  const host = resolve(base, 'host');
   const files = [
+    'bin/busybox',
     'etc/init.d/S50frr',
     'etc/init.d/S20anycastlab',
+    'usr/sbin/anycast-labd',
     'usr/libexec/anycastlab-agent',
     'usr/libexec/anycastlab-shell',
   ];
   for (const file of files) {
-    const path = resolve(base, file);
+    const path = resolve(target, file);
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, '#!/bin/sh\n');
   }
-  await writeFile(resolve(base, 'etc/inittab'), 'ttyS0::respawn:/sbin/getty -L -n -l /bin/sh ttyS0 115200 vt100\n');
-  return base;
+  await writeFile(
+    resolve(target, 'etc/inittab'),
+    '#ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100 # GENERIC_SERIAL\n' +
+      '::sysinit:/sbin/swapon -a\n::shutdown:/sbin/swapoff -a\n',
+  );
+  await mkdir(resolve(host, 'bin'), { recursive: true });
+  for (const tool of ['readelf', 'objcopy']) {
+    const path = resolve(host, `bin/i686-buildroot-linux-gnu-${tool}`);
+    await writeFile(path, tool === 'readelf'
+      ? '#!/bin/sh\nexit 1\n'
+      : '#!/bin/sh\nexit 0\n');
+    await chmod(path, 0o755);
+  }
+  return { base, host, target };
+}
+
+function postBuildEnvironment(fixture, mode) {
+  return { ...process.env, ANYCAST_PGO_MODE: mode, HOST_DIR: fixture.host };
 }
 
 function fakeReadelf() {
@@ -494,6 +532,11 @@ grep -Fxq elf "$file" || exit 3
 case "$1" in
   -h)
     echo '  Class:                             ELF32'
+    if [ "\${FAKE_NON_PIE_FILE:-}" = "\${file##*/}" ]; then
+      echo '  Type:                              EXEC (Executable file)'
+    else
+      echo '  Type:                              DYN (Position-Independent Executable file)'
+    fi
     echo '  Machine:                           Intel 80386'
     ;;
   -p)
@@ -514,6 +557,16 @@ case "$1" in
     ;;
   --wide)
     case "$2" in
+      --dynamic)
+        if [ "\${FAKE_NO_RELR_FILE:-}" != "\${file##*/}" ]; then
+          echo ' 0x00000024 (RELR)                    0x1000'
+          echo ' 0x00000023 (RELRSZ)                  64 (bytes)'
+          echo ' 0x00000025 (RELRENT)                 4 (bytes)'
+        fi
+        if [ "\${FAKE_NON_PIE_FILE:-}" != "\${file##*/}" ]; then
+          echo ' 0x6ffffffb (FLAGS_1)                  Flags: NOW PIE'
+        fi
+        ;;
       --dyn-syms)
         echo '  __anycast_clang_21_1_8'
         echo '  __anycast_o3_thinlto'
@@ -521,6 +574,7 @@ case "$1" in
         ;;
       --sections)
         if grep -Fxq profile-sections "$file"; then echo '  [10] __llvm_prf_cnts PROGBITS'; fi
+        if grep -Fxq command-section "$file"; then echo '  [11] .GCC.command.line PROGBITS'; fi
         ;;
       *) exit 2 ;;
     esac

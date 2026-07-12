@@ -38,6 +38,7 @@ beforeAll(async () => {
       frrProfileSha256: '4'.repeat(64),
     },
     machine: {
+      model: 'shared-namespaces',
       memoryBytes: 134_217_728,
       vgaMemoryBytes: 2_097_152,
       trunkMtu: 65_535,
@@ -75,7 +76,7 @@ it('creates and validates an external release status from immutable inputs', asy
     generation: 7,
     manifestUrl: `https://assets.example/releases/${digest}/manifest.json`,
     manifestSha256: digest,
-    buildId: 'anycastlab-v86-br2026.02.3-r3',
+    buildId: 'anycastlab-v86-br2026.02.3-r4',
     memoryBytes: 134_217_728,
     publishedAt: '2026-07-11T00:00:00.000Z',
     sourceRevision: 'a'.repeat(40),

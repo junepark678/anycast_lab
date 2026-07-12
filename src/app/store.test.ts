@@ -67,13 +67,13 @@ describe('lab editor store', () => {
     expect(useLabStore.getState().project.links.some((link) => link.id === 'link-transit-seoul')).toBe(false);
   });
 
-  it('switches every appliance between compatibility and version-pinned native VMs', () => {
+  it('switches every appliance between compatibility and version-pinned native namespaces', () => {
     useLabStore.getState().setRuntimeMode('native');
     let state = useLabStore.getState();
     expect(state.project.nodes.filter((node) => node.kind !== 'switch').every((node) => node.appliance.runtime === 'wasm')).toBe(true);
     expect(state.project.nodes.find((node) => node.id === 'pop-seoul')?.appliance.version).toBe('2.15.1');
     expect(state.project.nodes.find((node) => node.id === 'pop-frankfurt')?.appliance.version).toBe('10.5.1');
-    expect(projectCanvas(state.project).nodes.find((node) => node.id === 'pop-seoul')?.data.runtimeLabel).toContain('native Linux VM');
+    expect(projectCanvas(state.project).nodes.find((node) => node.id === 'pop-seoul')?.data.runtimeLabel).toContain('native namespace in shared VM');
     expect(state.dirty).toBe(true);
 
     state.setRuntimeMode('simulation');

@@ -144,20 +144,20 @@ test('selects and autosaves the version-pinned native VM fidelity', async ({ pag
       schemaVersion: 1,
       nativeV86: true,
       manifestSha256: 'a'.repeat(64),
-      buildId: 'test-native-image',
+      buildId: 'anycastlab-v86-br2026.02.3-r4',
       memoryBytes: 128 * 1024 * 1024,
     }),
   }));
   await page.goto('./');
   const native = page.getByRole('radio', { name: 'NATIVE VM' });
   await expect(native).toBeEnabled();
-  await expect(native).toHaveAttribute('title', /768 MiB for 6 VMs/);
+  await expect(native).toHaveAttribute('title', /128 MiB shared by 6 nodes/);
   await native.click();
   await expect(native).toBeChecked();
   await expect(page.getByText(/no compatibility fallback/)).toBeVisible();
   await page.getByTestId('rf__node-pop-seoul').click();
-  await expect(page.locator('.runtime-card')).toContainText('BIRD 2.15.1 · native Linux VM');
-  await expect(page.getByText('Native daemon · isolated VM')).toBeVisible();
+  await expect(page.locator('.runtime-card')).toContainText('BIRD 2.15.1 · native namespace in shared VM');
+  await expect(page.getByText('Native daemon · isolated namespace')).toBeVisible();
   await expect(page.getByText('Saved locally')).toBeVisible({ timeout: 5_000 });
   await page.reload();
   await expect(page.getByRole('radio', { name: 'NATIVE VM' })).toBeChecked();

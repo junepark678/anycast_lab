@@ -1,12 +1,13 @@
 # v86 Linux router appliance
 
-This directory builds the faithful appliance used by `src/appliances/v86`:
-an i686 Buildroot Linux kernel with an embedded root filesystem containing
-the pinned Buildroot packages for BIRD and FRRouting. The release build compiles
-those two daemon suites with pinned Clang/LLD 21.1.8, `-O3`, ThinLTO, and
-workload-trained PGO against Buildroot's i686 glibc sysroot. The rest of the
-image remains on Buildroot's supported GCC toolchain. The browser executes that
-kernel under the pinned official `v86` npm package.
+This directory builds the faithful appliance used by `src/appliances/v86`: one
+i686 Buildroot Linux kernel and an external, immutable SquashFS userspace with
+the pinned BIRD and FRRouting packages. A small supervisor creates the lab nodes
+inside that shared kernel with separate Linux namespaces and writable overlay
+roots. The release build compiles the two daemon suites with pinned Clang/LLD
+21.1.8, `-O3`, ThinLTO, and workload-trained PGO against Buildroot's i686 glibc
+sysroot. The rest of the image remains on Buildroot's supported GCC toolchain.
+The browser executes the kernel under the pinned official `v86` npm package.
 
 ## Reproducible build
 
@@ -83,32 +84,55 @@ dist/
 ├── manifest.json
 ├── manifest.sha256
 ├── router-bzimage.bin
+├── rootfs-complete.squashfs
+├── rootfs-base.squashfs
+├── rootfs-bird.squashfs
+├── rootfs-frr.squashfs
+├── rootfs-toolbox.squashfs
 ├── seabios.bin
 ├── vgabios.bin
 └── v86.wasm
 ```
 
-`manifest.sha256` is published in the external release status and supplied to
-`createV86RuntimeFactory`; the runtime verifies the manifest and every artifact
-before constructing a VM. This detects stale, truncated, or mixed build
-artifacts—it is not an authenticity boundary against a compromised artifact
-origin, because that origin serves both bytes and digest. A deployment that
-needs adversarial artifact provenance must pin the digest independently (for
-example in the application build or signed release metadata).
+`manifest.sha256` is published in the external release status. The runtime
+verifies the manifest, kernel, emulator/BIOS files, and required filesystem
+digest before constructing the machine. Immutable filesystem blobs are cached
+by SHA-256 in OPFS. v86 receives the cached `File` as an asynchronous disk, so
+SquashFS blocks are paged from OPFS instead of copying the whole image into the
+JavaScript heap. This detects stale, truncated, or mixed build artifacts—it is
+not an authenticity boundary against a compromised artifact origin, because
+that origin serves both bytes and digest. A deployment that needs adversarial
+artifact provenance must pin the digest independently, for example in the
+application build or signed release metadata.
 
-The root image mounts v86's in-memory 9p filesystem and dedicates `/dev/hvc0`
-to a small boot/config agent. Native files are transferred as validated ustar
-archives. `/dev/ttyS0` remains an interactive Linux serial shell. v86's one NIC
-is a private VLAN trunk; the browser adapter removes the private outer tag so
-each requested `ethN` behaves as an independent lab-fabric port.
-The normal FRR boot service is moved to `/usr/libexec/anycastlab-frr`, so an
-FRR appliance can start it explicitly after its native files and interfaces
-have been installed without also starting FRR on BIRD or client nodes.
-When a project does not provide `/etc/frr/daemons`, the host injects a minimal
-BGP policy. Other packaged protocol daemons are enabled with the same daemon
-activation file used by a normal FRR deployment.
-Each VM is capped at 128 MiB; the UI should show the aggregate memory estimate
-before starting a large native topology.
+The production kernel mounts `rootfs-complete.squashfs` directly from v86's
+first disk as a read-only root. The same build also emits content-addressed
+`base`, `bird`, `frr`, and `toolbox` logical layers. They make package ownership,
+dependency closure, reproducibility, and future selective mounting explicit;
+the current boot contract uses the verified `complete` layer while the split
+units are independently reusable across releases.
+
+One v86 machine serves the whole native topology. Its NIC is a private VLAN
+trunk; the browser adapter removes the private outer tag so each requested node
+interface behaves as an independent lab-fabric port. The boot service mounts
+the bounded 9p bootstrap at `/run/anycast-host` and starts `anycast-labd` on the
+reserved `/dev/hvc0` control channel. For each node, the supervisor creates
+separate mount, PID, network, UTS, IPC, cgroup, and time namespaces, an overlay
+root with the immutable appliance as its shared lower directory, isolated
+pseudo-filesystems and PTYs, and a cgroup-v2 process/memory envelope. Project
+files arrive as constrained ustar archives and are applied only to that node's
+writable upper directory. BIRD readiness is checked with `birdc`; FRR readiness
+requires its bounded start job to complete and the `watchfrr` supervisor to
+remain alive. Individual protocol configuration failures therefore remain
+diagnosable from the node's terminal instead of making the whole namespace
+inaccessible; native E2E coverage verifies `vtysh`, BGP, and OSPF behavior.
+Interactive terminals are namespace-local PTYs rather than shells on the host
+appliance.
+
+The production shared machine is budgeted at 128 MiB total, independent of node
+count; instrumented PGO training uses 256 MiB. Per-node writable state, daemon
+working sets, and packet queues still consume that shared budget, so topology
+size is bounded even though kernels and immutable pages are no longer duplicated.
 
 Native images are served from dedicated object storage, not Workers Static
 Assets. The build enforces a 512 MiB per-file browser-safety ceiling to catch
@@ -122,10 +146,12 @@ Ubuntu, trains it in the real native browser topology, merges and seals the
 profiles with the exact built `llvm-profdata`, and rebuilds BIRD and FRR with
 profile use. It then runs the full verification gate with the final real native
 VM test required and uploads the verified bundle as a GitHub Actions artifact.
-Each file is published under the digest-addressed OCI Object Storage key
-`anycast-lab/native-v86/objects/sha256/<manifest-digest>/` and writes
-`channels/<channel>/status.json` last. Tag pushes matching `v86-*` advance the
-`stable` channel; a manual run can select another channel.
+The manifest, kernel, emulator, and BIOS files are published under the
+digest-addressed OCI Object Storage key
+`anycast-lab/native-v86/objects/sha256/<manifest-digest>/`. Each SquashFS layer
+uses its own reusable `blobs/sha256/<layer-digest>.squashfs` key. The publisher
+writes `channels/<channel>/status.json` last. Tag pushes matching `v86-*`
+advance the `stable` channel; a manual run can select another channel.
 
 The workflow restores an exact profile set keyed by the complete training
 context, then an exact final bundle keyed by both the appliance inputs and the
@@ -217,10 +243,10 @@ requests remain credential-free, and the published manifest and every binary
 are verified before v86 starts.
 
 OCI bucket versioning is recommended for recovery from an accidental channel
-overwrite; the PAR itself cannot delete objects. Each digest bundle is about
-20 MiB, so periodically remove only digests that are no longer referenced by a
-channel or retained for rollback. Do not use a blind age rule that could delete
-the currently live digest.
+overwrite; the PAR itself cannot delete objects. Periodically remove only
+manifest objects and layer blobs that are no longer reachable from a channel or
+retained rollback release. Do not use a blind age rule that could delete the
+currently live manifest or a reused layer.
 
 ## Runtime dependency
 

@@ -15,10 +15,12 @@ The application has five boundaries:
    debounced autosave, and bounded ZIP import/export.
 3. **Compatibility engine** — deterministic protocol/FIB model and explainable
    trace used only when SIM is selected.
-4. **Native orchestration** — lifecycle, raw L2 fabric, links, switches,
-   terminals, capture, and the versioned appliance ABI.
-5. **v86 appliance** — a pinned i686 Buildroot Linux image containing BIRD and
-   FRR, executed locally by v86's WebAssembly CPU/device emulator.
+4. **Native orchestration** — lifecycle, one shared guest, namespace-local
+   nodes, raw L2 fabric, links, switches, terminals, capture, and the versioned
+   appliance ABI.
+5. **v86 appliance** — a pinned i686 Buildroot Linux kernel, external SquashFS,
+   and namespace supervisor containing BIRD and FRR, executed locally by v86's
+   WebAssembly CPU/device emulator.
 
 ## Fidelity is project state
 
@@ -43,23 +45,36 @@ the fidelity label meaningless. The usable MVP therefore runs the actual
 Buildroot packages inside Linux. BIRD/FRR are native i686 binaries; v86 itself
 is the WebAssembly component.
 
-The pinned image contains BIRD 2.15.1, FRR 10.5.1, iproute2, iputils,
-traceroute, tcpdump, and ethtool. It is an initramfs kernel with no persistent
-disk and no route to the public Internet.
+The pinned userspace contains BIRD 2.15.1, FRR 10.5.1, iproute2, traceroute,
+tcpdump, and a curated BusyBox whose non-setuid ping applets replace iputils.
+Unused ethtool/iputils tools, startup services, documentation, locales, modules,
+and privilege bits are removed. The kernel mounts an external, immutable
+SquashFS and has no route to the public Internet.
 
 ### Verified artifacts and boot
 
-The build emits a manifest, its digest, the Linux `bzImage`, v86 WASM, SeaBIOS,
-and VGA BIOS. A dedicated release workflow publishes these under immutable,
-digest-addressed OCI Object Storage keys, then advances a channel status document as its final
-write. The guide packages only a same-origin pointer to that external status.
-The browser verifies the manifest and each artifact before constructing a VM.
+The build emits a manifest, its digest, the Linux `bzImage`, a complete boot
+SquashFS, logical base/BIRD/FRR/toolbox SquashFS units, v86 WASM, SeaBIOS, and VGA
+BIOS. A dedicated release workflow publishes the manifest bundle and each
+individually addressed filesystem blob to OCI Object Storage, then advances a
+channel status document as its final write. The guide packages only a pointer
+to that external status. The browser verifies every required digest, streams
+immutable artifacts into a SHA-256 OPFS cache, and gives v86 an asynchronous
+`File`; kernel SquashFS reads therefore page from OPFS without retaining the
+whole disk in the JavaScript heap. The current machine boots the complete layer;
+the split units provide deterministic, reusable package boundaries for the
+selective-mount contract.
 
-Each requested guest interface becomes an 802.1Q subinterface of v86's single
-virtual NIC. The private VLAN tag is consumed by the adapter and never appears
-on the lab fabric. Configuration files and a generated start script cross an
-in-memory 9p channel as validated ustar archives. `/dev/hvc0` is reserved for a
-small control agent; `/dev/ttyS0` remains the user's interactive root shell.
+The topology uses one v86 machine and one Linux kernel. Each requested node
+interface becomes an 802.1Q subinterface of v86's single virtual NIC. The
+private VLAN tag is consumed by the adapter and never appears on the lab fabric.
+A bounded bootstrap archive crosses v86's 9p channel, and `/dev/hvc0` is reserved
+for the versioned `anycast-labd` protocol. The supervisor gives every logical
+node its own mount, PID, network, UTS, IPC, cgroup, and time namespaces; a
+writable overlay upper directory over the shared immutable root; isolated
+`proc`, `sysfs`, `devpts`, and PTYs; and cgroup-v2 limits. Terminals attach to
+namespace-local PTYs, so a user sees that node's filesystem, hostname,
+interfaces, and processes rather than the shared host appliance.
 
 BIRD is executed in the foreground against the selected entrypoint. FRR uses
 its upstream init helper only after `/etc/frr/frr.conf` and interfaces exist;
@@ -77,8 +92,8 @@ first interface.
 
 The native service primitive currently supplies address ownership and kernel
 ICMP only. DNS, HTTP, and arbitrary TCP/UDP servers are not synthesized from
-the topology document; users can start those real processes from the serial
-shell. SIM may model declared higher-level service delivery for guided traces.
+the topology document; users can start those real processes from the node
+terminal. SIM may model declared higher-level service delivery for guided traces.
 
 ### Native Ethernet fabric
 
@@ -141,6 +156,10 @@ is reconstructed byte-for-byte, including line endings and trailing spaces.
 This isolates ordinary lab traffic and configuration mistakes. It is not a
 claim that v86 or the guest kernel is a hardened boundary for hostile code, so
 deployments should retain normal browser/site isolation and size limits.
+Node shells run as root and the per-node namespaces share the kernel's initial
+user namespace. They are fidelity and resource boundaries for nodes owned by
+one trusted browser user, not tenant or privilege boundaries; mutually hostile
+users or binaries require a separate hardened sandbox outside this lab.
 
 ## Current scope
 
@@ -149,8 +168,9 @@ an exhaustive GNS3 replacement. It supports BIRD/FRR protocols compiled into
 the image, Linux clients/services, switches, IPv4/IPv6, raw capture, and manual
 failures. Structural and configuration edits are locked while a native runtime
 owns the project, preventing the saved/exported topology from diverging from
-the VMs; reset the runtime before editing, or use the serial shell for an
-intentional live experiment. VM snapshots exist
-at the appliance boundary but are not yet part of the project archive. Each VM
-uses 128 MiB, so large native topologies are intentionally more expensive than
-SIM.
+the running namespaces; reset the runtime before editing, or use a node
+terminal for an intentional live experiment. The production shared machine
+uses 128 MiB total rather than multiplying that allocation by node count. Node
+daemon working sets, writable overlays, capture queues, and kernel state still
+share that finite budget, so large native topologies remain more expensive
+than SIM.

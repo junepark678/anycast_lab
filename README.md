@@ -18,15 +18,18 @@ topology plus the exact appliance file tree; no account or backend is needed.
 - **NATIVE VM** runs pinned Buildroot packages for BIRD 2.15.1 and FRR 10.5.1
   as native i686 Linux executables. Release binaries use Clang 21, `-O3`,
   ThinLTO, and profiles collected from the real BGP/OSPF native workload. The
-  Linux guests run under the pinned v86 WebAssembly emulator. Linux clients and
-  services participate on the same raw-Ethernet fabric, serial shells are
+  The Linux machine runs under the pinned v86 WebAssembly emulator. Logical nodes
+  share its kernel and immutable filesystem pages while receiving separate
+  mount, PID, network, UTS, IPC, cgroup, and time namespaces. Linux clients and
+  services participate on the same raw-Ethernet fabric, node terminals are
   interactive, and captures export as PCAPNG. Native service nodes own
   addresses and answer kernel ICMP; application servers are started explicitly
-  from their serial shells.
+  from their node terminals.
 
 Native mode has no compatibility fallback. Its selector is disabled when the
-verified VM image is not part of the deployment. Each guest is allocated 128
-MiB, and the UI shows the aggregate estimate before startup.
+verified VM image is not part of the deployment. One shared machine is
+allocated 128 MiB for the native topology, and the UI shows that fixed estimate
+before startup.
 
 ## Development
 
@@ -77,7 +80,8 @@ bun run verify:full
 ```
 
 When the image is present, Playwright boots Linux, starts the real BIRD binary,
-and starts the real FRR suite in a second VM. It requires cross-VM ping, an
+and starts the real FRR suite in an isolated sibling node. It requires
+cross-node ping, an
 Established BGP session and OSPF adjacency reported by both `birdc` and
 `vtysh`, an installed BGP route with a routed ping, a locked running project,
 and a packet-bearing PCAPNG export.

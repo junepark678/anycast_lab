@@ -8,6 +8,10 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { createReleaseStatus } from './release-status.mjs';
+import {
+  createFilesystemMetadata,
+  FILESYSTEM_LAYER_DEFINITIONS,
+} from './filesystem-layout.mjs';
 import { PINNED_V86_MANIFEST_IDENTITY } from './verify-manifest.mjs';
 
 const execute = promisify(execFile);
@@ -39,6 +43,13 @@ async function createFixture(root) {
     await writeFile(resolve(artifactDirectory, file), bytes);
     artifacts.push({ id, file, size: bytes.byteLength, sha256: digest(bytes) });
   }
+  const filesystemArtifacts = [];
+  for (const { id, file } of FILESYSTEM_LAYER_DEFINITIONS) {
+    const bytes = Buffer.from(`publish-filesystem:${id}`);
+    await writeFile(resolve(artifactDirectory, file), bytes);
+    filesystemArtifacts.push({ id, size: bytes.byteLength, sha256: digest(bytes) });
+  }
+  const filesystem = createFilesystemMetadata(filesystemArtifacts);
   const manifestBytes = Buffer.from(`${JSON.stringify({
     ...PINNED_V86_MANIFEST_IDENTITY,
     pgo: {
@@ -49,10 +60,12 @@ async function createFixture(root) {
       frrProfileSha256: '4'.repeat(64),
     },
     machine: {
+      model: 'shared-namespaces',
       memoryBytes: 128 * 1024 * 1024,
       vgaMemoryBytes: 2 * 1024 * 1024,
       trunkMtu: 65_535,
     },
+    filesystem,
     artifacts,
   }, null, 2)}\n`);
   const manifestDigest = digest(manifestBytes);
@@ -72,7 +85,7 @@ async function createFixture(root) {
     publishedAt: '2026-07-11T00:00:00.000Z',
   });
   await writeFile(statusPath, `${JSON.stringify(status, null, 2)}\n`);
-  return { artifactDirectory, manifestDigest, statusPath };
+  return { artifactDirectory, filesystem, manifestDigest, statusPath };
 }
 
 async function createMockCurl(root) {
@@ -193,16 +206,24 @@ describe('publish-oci.sh', () => {
 
     const writes = (await readFile(env.MOCK_OCI_LOG, 'utf8'))
       .trim().split('\n').filter((line) => line.startsWith('PUT par '));
-    expect(writes).toHaveLength(7);
+    expect(writes).toHaveLength(12);
     expect(writes.at(-1)).toBe('PUT par anycast-lab/native-v86/channels/stable/status.json');
     for (const file of ['manifest.json', 'manifest.sha256', 'router-bzimage.bin', 'seabios.bin', 'vgabios.bin', 'v86.wasm']) {
       expect(writes).toContain(
         `PUT par anycast-lab/native-v86/objects/sha256/${fixture.manifestDigest}/${file}`,
       );
     }
+    for (const layer of fixture.filesystem.layers) {
+      expect(writes).toContain(
+        `PUT par anycast-lab/native-v86/${layer.object}`,
+      );
+    }
     const metadata = await readFile(env.MOCK_OCI_METADATA_LOG, 'utf8');
     expect(metadata).toContain('v86.wasm Content-Type: application/wasm | Cache-Control: public, max-age=31536000, immutable | If-None-Match: *');
     expect(metadata).toContain('status.json Content-Type: application/json | Cache-Control: no-store, max-age=0');
+    expect(metadata).toContain(
+      `${fixture.filesystem.layers[0].object} Content-Type: application/octet-stream | Cache-Control: public, max-age=31536000, immutable | If-None-Match: *`,
+    );
   });
 
   it('reuses identical immutable objects without rewriting them', async () => {
@@ -286,6 +307,21 @@ describe('publish-oci.sh', () => {
     expect(writes).toEqual([]);
   });
 
+  it('never advances the channel when an immutable filesystem layer cannot be inspected', async () => {
+    const root = await temporaryDirectory();
+    const fixture = await createFixture(root);
+    const bin = await createMockCurl(root);
+    const env = environment(root, fixture, bin);
+    env.MOCK_AUTH_FAILURE_KEY = `anycast-lab/native-v86/${fixture.filesystem.layers[2].object}`;
+
+    await expect(execute('bash', [publisher], { env })).rejects.toMatchObject({
+      stderr: expect.stringContaining('HTTP 403'),
+    });
+    const writes = (await readFile(env.MOCK_OCI_LOG, 'utf8'))
+      .trim().split('\n').filter((line) => line.startsWith('PUT par '));
+    expect(writes).not.toContain('PUT par anycast-lab/native-v86/channels/stable/status.json');
+  });
+
   it('refuses to move a channel backward to an older workflow generation', async () => {
     const root = await temporaryDirectory();
     const fixture = await createFixture(root);
@@ -364,6 +400,22 @@ describe('publish-oci.sh', () => {
 
     await expect(execute('bash', [publisher], { env })).rejects.toMatchObject({
       stderr: expect.stringContaining('requires PGO mode use'),
+    });
+    await expect(readFile(env.MOCK_OCI_LOG, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses a corrupted content-addressed layer before contacting OCI', async () => {
+    const root = await temporaryDirectory();
+    const fixture = await createFixture(root);
+    await writeFile(
+      resolve(fixture.artifactDirectory, fixture.filesystem.layers[1].file),
+      'corrupted base layer',
+    );
+    const bin = await createMockCurl(root);
+    const env = environment(root, fixture, bin);
+
+    await expect(execute('bash', [publisher], { env })).rejects.toMatchObject({
+      stderr: expect.stringContaining('Filesystem layer verification failed: base'),
     });
     await expect(readFile(env.MOCK_OCI_LOG, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
   });

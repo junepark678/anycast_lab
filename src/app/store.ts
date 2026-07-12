@@ -82,8 +82,8 @@ function nodeToCanvas(node: LabNode, snapshot?: EngineSnapshot | null, engineRun
       runtime: node.appliance.runtime === 'wasm' ? 'native-wasm' : node.kind === 'router' || node.kind === 'route-server' ? 'compatibility' : 'builtin',
       runtimeLabel: node.appliance.runtime === 'wasm'
         ? node.kind === 'client' || node.kind === 'service'
-          ? `Linux ${node.kind} · native VM in WebAssembly`
-          : `${node.appliance.kind.toUpperCase()} ${node.appliance.version ?? ''} · native Linux VM`
+          ? `Linux ${node.kind} · native namespace in shared VM`
+          : `${node.appliance.kind.toUpperCase()} ${node.appliance.version ?? ''} · native namespace in shared VM`
         : node.kind === 'router' || node.kind === 'route-server'
           ? `${node.appliance.kind.toUpperCase()} compatibility runtime`
           : `${node.appliance.kind} appliance`,

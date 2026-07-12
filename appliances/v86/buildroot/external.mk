@@ -20,6 +20,7 @@ ANYCAST_COMMON_CFLAGS = \
 ANYCAST_COMMON_LDFLAGS = \
 	$(TARGET_LDFLAGS) \
 	-O3 -march=$(ANYCAST_TARGET_CPU) -flto=thin -fuse-ld=lld \
+	-Wl,-z,pack-relative-relocs \
 	-Wl,--defsym=__anycast_clang_$(subst .,_,$(LLVM_PROJECT_VERSION))=1 \
 	-Wl,--export-dynamic-symbol=__anycast_clang_$(subst .,_,$(LLVM_PROJECT_VERSION)) \
 	-Wl,--defsym=__anycast_o3_thinlto=1 \
@@ -154,6 +155,14 @@ FRR_CONF_ENV += \
 	RANLIB="$(ANYCAST_LLVM_RANLIB)" \
 	CFLAGS="$(ANYCAST_COMMON_CFLAGS) -DFRR_XREF_NO_NOTE" \
 	LDFLAGS="$(ANYCAST_COMMON_LDFLAGS)"
+# The lab is not a multi-user host: every daemon already runs inside its own
+# PID/mount/net/UTS/IPC/cgroup/time namespace and the appliance console is root.
+# Keeping FRR on that identity also makes copy-up through the private overlay
+# deterministic and lets us omit target libcap.
+FRR_CONF_OPTS += \
+	--enable-user=root \
+	--enable-group=root \
+	--enable-vty-group=root
 FRR_MAKE_ENV += \
 	BR2_USE_CCACHE=0 \
 	ANYCAST_FRR_LIBFRR_PGO_CFLAGS="$(ANYCAST_FRR_LIBFRR_PGO_CFLAGS)" \

@@ -1,0 +1,8 @@
+config BR2_PACKAGE_ANYCAST_LABD
+	bool "anycast-labd"
+	depends on BR2_USE_MMU
+	select BR2_PACKAGE_IPROUTE2
+	help
+	  Shared-kernel native lab supervisor. It creates isolated router/client
+	  namespaces, per-node overlay roots and VLAN interfaces, then exposes the
+	  bounded ANYCASTLAB/2 control protocol over the virtio console.

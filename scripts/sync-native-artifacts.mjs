@@ -55,6 +55,7 @@ async function verifyLocalBundle() {
   if (!/^[a-f0-9]{64}$/.test(expectedDigest)) throw new Error('v86 manifest.sha256 is invalid');
   const verified = await verifyV86ArtifactBundle(manifestPath, {
     expectedManifestSha256: expectedDigest,
+    requiredFilesystem: true,
   });
   return { ...verified, digestPath };
 }
@@ -103,6 +104,9 @@ if (localBundle !== null) {
   await copyFile(localBundle.digestPath, resolve(destination, 'manifest.sha256'));
   await Promise.all(localBundle.artifacts.map((artifact) => (
     copyFile(artifact.path, resolve(destination, artifact.file))
+  )));
+  await Promise.all(localBundle.filesystemLayers.map((layer) => (
+    copyFile(layer.path, resolve(destination, layer.file))
   )));
 }
 await writeFile(statusPath, `${JSON.stringify(status, null, 2)}\n`);

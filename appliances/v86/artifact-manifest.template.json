@@ -31,10 +31,12 @@
     "frrProfileSha256": @FRR_PROFILE_SHA256_JSON@
   },
   "machine": {
+    "model": "shared-namespaces",
     "memoryBytes": @GUEST_MEMORY_BYTES@,
     "vgaMemoryBytes": 2097152,
     "trunkMtu": 65535
   },
+  "filesystem": @FILESYSTEM_JSON@,
   "artifacts": [
     {
       "id": "v86-wasm",

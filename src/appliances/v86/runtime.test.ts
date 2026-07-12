@@ -66,6 +66,13 @@ describe('V86ApplianceRuntime', () => {
     await runtime.initialize(bootRequest(), host);
     expect(fake.options?.autostart).toBe(false);
     expect(fake.options?.net_device).toEqual({ type: 'virtio', mtu: 65_535 });
+    expect(fake.options?.hda.async).toBe(true);
+    expect(fake.options?.hda.buffer.size).toBe(1);
+    expect(fake.options?.cmdline).toContain('root=/dev/sda rootfstype=squashfs ro');
+    expect(fake.options?.cmdline.split(/\s+/)).toEqual(expect.arrayContaining([
+      'dummy.numdummies=0',
+      'ifb.numifbs=0',
+    ]));
     expect(fake.files.has('/anycastlab-bootstrap.tar')).toBe(true);
     const startScript = new TextDecoder().decode(
       readUstarArchive(fake.files.get('/anycastlab-bootstrap.tar')!)
@@ -73,7 +80,9 @@ describe('V86ApplianceRuntime', () => {
     );
     expect(startScript).toContain('[ -S /var/run/bird.ctl ] && LLVM_PROFILE_FILE=/dev/null /usr/sbin/birdc show status');
     expect(startScript).toContain('kill -0 "$appliance_pid"');
-    expect(startScript).toContain('[ "$attempt" -lt 480 ]');
+    expect(startScript).toContain('[ "$attempt" -lt 120 ]');
+    expect(startScript).toContain('sleep 1');
+    expect(startScript).not.toMatch(/\bsleep\s+\d+\.\d+\b/);
     expect(startScript).toContain('appliance readiness probe timed out');
     expect(startScript).toContain('if [ -f /etc/anycastlab/pgo-generate ]; then');
     expect(startScript).toContain('[ ! -L /tmp/anycast-pgo ]');
@@ -651,7 +660,45 @@ function artifactBundle(pgoMode: 'generate' | 'use' = 'use'): VerifiedV86Artifac
         birdProfileSha256: '6'.repeat(64),
         frrProfileSha256: '7'.repeat(64),
       },
-      machine: { memoryBytes: 256 * 1024 * 1024, vgaMemoryBytes: 2 * 1024 * 1024, trunkMtu: 65_535 },
+      machine: {
+        model: 'shared-namespaces',
+        memoryBytes: 256 * 1024 * 1024,
+        vgaMemoryBytes: 2 * 1024 * 1024,
+        trunkMtu: 65_535,
+      },
+      filesystem: {
+        schemaVersion: 1,
+        layoutVersion: 1,
+        format: 'squashfs',
+        compression: 'zstd',
+        blockSize: 65_536,
+        cache: { namespace: 'anycastlab-v86-filesystem-v1', key: `sha256:${'8'.repeat(64)}` },
+        layers: [
+          {
+            id: 'complete', role: 'boot-complete', requiredAtBoot: true,
+            file: 'rootfs-complete.squashfs', object: `blobs/sha256/${'8'.repeat(64)}.squashfs`,
+            size: 1, sha256: '8'.repeat(64), cacheKey: `sha256:${'8'.repeat(64)}`,
+            dependsOn: [], mount: { type: 'root', path: '/', order: 0, readOnly: true },
+          },
+          {
+            id: 'base', role: 'overlay-base', requiredAtBoot: false,
+            file: 'rootfs-base.squashfs', object: `blobs/sha256/${'9'.repeat(64)}.squashfs`,
+            size: 1, sha256: '9'.repeat(64), cacheKey: `sha256:${'9'.repeat(64)}`,
+            dependsOn: [], mount: { type: 'overlay-base', path: '/', order: 0, readOnly: true },
+          },
+          ...([
+            ['bird', 'routing-suite', 'a', 10],
+            ['frr', 'routing-suite', 'b', 20],
+            ['toolbox', 'diagnostics', 'c', 30],
+          ] as const).map(([id, role, digest, order]) => ({
+            id, role, requiredAtBoot: false,
+            file: `rootfs-${id}.squashfs`, object: `blobs/sha256/${digest.repeat(64)}.squashfs`,
+            size: 1, sha256: digest.repeat(64), cacheKey: `sha256:${digest.repeat(64)}`,
+            dependsOn: ['base'] as const,
+            mount: { type: 'overlay-lower' as const, path: '/' as const, order, readOnly: true as const },
+          })),
+        ],
+      },
       artifacts: [
         { id: 'v86-wasm', file: 'v86.wasm', size: 1, sha256: '0'.repeat(64) },
         { id: 'bios', file: 'seabios.bin', size: 1, sha256: '1'.repeat(64) },
@@ -664,6 +711,14 @@ function artifactBundle(pgoMode: 'generate' | 'use' = 'use'): VerifiedV86Artifac
       bios: new Uint8Array([1]),
       'vga-bios': new Uint8Array([2]),
       bzimage: new Uint8Array([3]),
+    },
+    filesystems: {
+      complete: {
+        size: 1,
+        sha256: '8'.repeat(64),
+        blob: new Blob([new Uint8Array([4])]),
+        cacheHit: true,
+      },
     },
   };
 }

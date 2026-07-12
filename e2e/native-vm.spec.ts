@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { LabProject } from '../src/core';
@@ -15,7 +15,67 @@ interface PgoNativeIdentity {
   readonly buildId: string;
 }
 
-test('boots real BIRD and FRR VMs, establishes BGP and OSPF, and forwards over the browser fabric', async ({ page }, testInfo) => {
+const nativeNodeProbes = [
+  {
+    nodeId: 'bird-native',
+    hostname: 'native-bird',
+    addresses: ['192.0.2.0/31', '203.0.113.7/32'],
+    connectedRoute: '192.0.2.0/31',
+    sentinel: '/tmp/anycastlab-bird-namespace',
+    daemon: 'bird',
+  },
+  {
+    nodeId: 'frr-native',
+    hostname: 'native-frr',
+    addresses: ['192.0.2.1/31'],
+    connectedRoute: '192.0.2.0/31',
+    sentinel: '/tmp/anycastlab-frr-namespace',
+    foreignSentinel: '/tmp/anycastlab-bird-namespace',
+    daemon: 'frr',
+  },
+] as const;
+
+type NativeNodeProbe = (typeof nativeNodeProbes)[number];
+type NamespaceKind = 'pid' | 'mnt' | 'net' | 'uts' | 'ipc' | 'cgroup' | 'time';
+type NamespaceSnapshot = Readonly<Record<NamespaceKind, string>>;
+
+const browserDiagnostics = new WeakMap<Page, string[]>();
+
+test.beforeEach(async ({ page }) => {
+  const messages: string[] = [];
+  browserDiagnostics.set(page, messages);
+  const record = (message: string) => {
+    messages.push(message);
+    if (messages.length > 500) messages.splice(0, messages.length - 500);
+  };
+  page.on('console', (message) => record(`[console:${message.type()}] ${message.text()}`));
+  page.on('pageerror', (error) => record(`[pageerror] ${error.stack ?? error.message}`));
+  page.on('requestfailed', (request) => {
+    record(`[requestfailed] ${request.method()} ${request.url()} :: ${request.failure()?.errorText ?? 'unknown error'}`);
+  });
+});
+
+test.afterEach(async ({ page }, testInfo) => {
+  if (testInfo.status === testInfo.expectedStatus || testInfo.status === 'skipped') return;
+  await attachNativeFailureDiagnostics(page, testInfo, browserDiagnostics.get(page) ?? []);
+});
+
+test('keeps native guest probes within the interactive PTY input budget', () => {
+  const phases = nativeNodeProbes.flatMap((probe) => [
+    ...nativeNodePreflightCommands(probe),
+    ...nativeDiagnosticCommands(probe),
+  ]);
+  expect(new Set(phases.map(({ marker }) => marker)).size).toBe(phases.length);
+  for (const { marker, input } of phases) {
+    expect(input, `${marker} must not echo its complete marker before execution`).not.toContain(marker);
+    expect(
+      new TextEncoder().encode(input).byteLength,
+      `${marker} exceeds the conservative canonical PTY line budget`,
+    ).toBeLessThanOrEqual(1_024);
+  }
+});
+
+test('boots real BIRD and FRR namespaces, establishes BGP and OSPF, and forwards over the browser fabric', async ({ page }, testInfo) => {
   const collectPgo = process.env.ANYCAST_LAB_COLLECT_PGO === '1';
   test.setTimeout(collectPgo ? 900_000 : 360_000);
   await page.goto('./');
@@ -193,6 +253,29 @@ ospfd_options="-A 127.0.0.1"
     timeout: collectPgo ? 360_000 : 180_000,
   });
 
+  const namespaceSnapshots = new Map<string, NamespaceSnapshot>();
+  for (const probe of nativeNodeProbes) {
+    const snapshot = await test.step(
+      `validate ${probe.nodeId} namespace, interface, routes, and daemon`,
+      () => validateNativeNode(page, probe),
+    );
+    namespaceSnapshots.set(probe.nodeId, snapshot);
+  }
+  await test.step('validate namespace and filesystem isolation between appliances', async () => {
+    expectNamespacesIsolated(
+      requireNamespaceSnapshot(namespaceSnapshots, 'bird-native'),
+      requireNamespaceSnapshot(namespaceSnapshots, 'frr-native'),
+    );
+    const output = await runNativeCommand(
+      page,
+      'bird-native',
+      "if [ ! -e /tmp/anycastlab-frr-namespace ]; then isolated=yes; else isolated=no; fi; printf '%s%s %s\\n' 'FILESYSTEM-ISOLATION-' 'DONE' \"$isolated\"",
+      'FILESYSTEM-ISOLATION-DONE',
+      10_000,
+    );
+    expect(output).toMatch(/^FILESYSTEM-ISOLATION-DONE yes$/m);
+  });
+
   await page.getByTestId('rf__node-bird-native').click();
   const command = page.getByRole('textbox', { name: 'Terminal command' });
   const terminal = page.locator('.terminal-output');
@@ -362,6 +445,306 @@ ospfd_options="-A 127.0.0.1"
     }, null, 2)}\n`);
   }
 });
+
+async function validateNativeNode(page: Page, probe: NativeNodeProbe): Promise<NamespaceSnapshot> {
+  const outputs: string[] = [];
+  for (const phase of nativeNodePreflightCommands(probe)) {
+    outputs.push(await runNativeCommand(page, probe.nodeId, phase.input, phase.marker, 15_000));
+  }
+  const output = outputs.join('\n');
+  const failedChecks = [...output.matchAll(/^CHECK ([^\r\n]+) failed$/gm)].map((match) => match[1]);
+  expect(
+    failedChecks,
+    `${probe.nodeId} guest preflight failed: ${failedChecks.length > 0 ? failedChecks.join(', ') : 'unknown check'}`,
+  ).toEqual([]);
+  return parseNamespaceSnapshot(output, probe.nodeId);
+}
+
+interface NativeProbePhase {
+  readonly marker: string;
+  readonly input: string;
+}
+
+function nativeNodePreflightCommands(probe: NativeNodeProbe): readonly NativeProbePhase[] {
+  const linkState = `/tmp/anycastlab-test-${probe.nodeId}-link`;
+  const addressState = `/tmp/anycastlab-test-${probe.nodeId}-addresses`;
+  const routeState = `/tmp/anycastlab-test-${probe.nodeId}-routes`;
+  const daemonState = `/tmp/anycastlab-test-${probe.nodeId}-daemon`;
+  const identity = [
+    `check hostname test "$(hostname 2>/dev/null)" = ${shellQuote(probe.hostname)}`,
+    "check proc-pid-one test -r /proc/1/status",
+    ...('foreignSentinel' in probe ? [
+      `if [ ! -e ${shellQuote(probe.foreignSentinel)} ]; then report filesystem-isolation ok; else report filesystem-isolation failed; fi`,
+    ] : []),
+    `if printf '%s\\n' ${shellQuote(probe.nodeId)} > ${shellQuote(probe.sentinel)}; then report filesystem-writable ok; else report filesystem-writable failed; fi`,
+    "for namespace in pid mnt net uts ipc cgroup time; do namespace_id=$(readlink \"/proc/self/ns/$namespace\" 2>/dev/null || true); printf 'NS %s %s\\n' \"$namespace\" \"$namespace_id\"; done",
+  ];
+  const link = [
+    `if ip -o link show dev eth0 > ${shellQuote(linkState)} 2>&1; then report eth0-exists ok; else report eth0-exists failed; fi`,
+    `cat ${shellQuote(linkState)}`,
+    `check eth0-admin-up grep -Eq '[<,]UP[,>]' ${shellQuote(linkState)}`,
+    `if grep -Eq '[<,]NOARP[,>]' ${shellQuote(linkState)}; then report eth0-arp failed; else report eth0-arp ok; fi`,
+    `check eth0-mtu grep -Eq ' mtu 1500( |$)' ${shellQuote(linkState)}`,
+    "if ip -o link show dev lo > /tmp/anycastlab-test-lo 2>&1 && grep -Eq '[<,]UP[,>]' /tmp/anycastlab-test-lo; then report loopback-up ok; else report loopback-up failed; fi",
+  ];
+  const addresses = [
+    `if ip -o -4 address show dev eth0 scope global > ${shellQuote(addressState)} 2>&1; then report addresses-readable ok; else report addresses-readable failed; fi`,
+    `cat ${shellQuote(addressState)}`,
+    `address_count=$(wc -l < ${shellQuote(addressState)}); check address-count test "$address_count" -eq ${probe.addresses.length}`,
+    ...probe.addresses.map((address) => (
+      `check ${shellQuote(`address-${address}`)} grep -Fq ${shellQuote(`inet ${address} `)} ${shellQuote(addressState)}`
+    )),
+  ];
+  const routes = [
+    `if ip -4 route show table main dev eth0 > ${shellQuote(routeState)} 2>&1; then report routes-readable ok; else report routes-readable failed; fi`,
+    `cat ${shellQuote(routeState)}`,
+    `check connected-route grep -Fq ${shellQuote(probe.connectedRoute)} ${shellQuote(routeState)}`,
+  ];
+  const daemonPhases: readonly (readonly [string, readonly string[]])[] = probe.daemon === 'bird' ? [[
+    'DAEMON', [
+      `if birdc show status > ${shellQuote(daemonState)} 2>&1; then report bird-control ok; else report bird-control failed; fi`,
+      `check bird-version grep -Fq 'BIRD 2.15.1' ${shellQuote(daemonState)}`,
+    ],
+  ]] : [[
+    'DAEMON-HEALTH', [
+      'check frr-ready-marker test -f /run/anycastlab/frr.ready',
+      'if [ ! -s /run/anycastlab/entrypoint.failure ]; then report frr-not-degraded ok; else report frr-not-degraded failed; fi',
+      "for daemon in watchfrr zebra bgpd ospfd; do daemon_pid=; daemon_live=no; if [ -r \"/run/frr/$daemon.pid\" ] && IFS= read -r daemon_pid < \"/run/frr/$daemon.pid\"; then case \"$daemon_pid\" in ''|*[!0-9]*) ;; *) if kill -0 \"$daemon_pid\" 2>/dev/null; then daemon_live=yes; fi ;; esac; fi; if [ \"$daemon_live\" = yes ]; then report \"$daemon-live\" ok; else report \"$daemon-live\" failed; fi; done",
+    ],
+  ], [
+    'DAEMON-CONTROL', [
+      `if vtysh -c 'show version' > ${shellQuote(daemonState)} 2>&1; then report frr-vtysh ok; else report frr-vtysh failed; fi`,
+      `check frr-version grep -Fq 'FRRouting 10.5.1' ${shellQuote(daemonState)}`,
+    ],
+  ]];
+  return [
+    nativeProbePhase(probe.nodeId, 'IDENTITY', identity, true),
+    nativeProbePhase(probe.nodeId, 'LINK', link),
+    nativeProbePhase(probe.nodeId, 'ADDRESSES', addresses),
+    nativeProbePhase(probe.nodeId, 'ROUTES', routes),
+    ...daemonPhases.map(([phase, commands]) => nativeProbePhase(probe.nodeId, phase, commands)),
+  ];
+}
+
+function nativeProbePhase(
+  nodeId: string,
+  phase: string,
+  commands: readonly string[],
+  includeHelpers = false,
+): NativeProbePhase {
+  const marker = `NATIVE-NODE-${nodeId}-${phase}-DONE`;
+  const helpers = [
+    "report() { if [ \"$2\" = ok ]; then result=ok; else result=failed; fi; printf 'CHECK %s %s\\n' \"$1\" \"$result\"; }",
+    "check() { label=$1; shift; if \"$@\"; then report \"$label\" ok; else report \"$label\" failed; fi; }",
+  ];
+  return {
+    marker,
+    input: [...(includeHelpers ? helpers : []), ...commands, shellCompletion(marker)].join('; '),
+  };
+}
+
+async function runNativeCommand(
+  page: Page,
+  nodeId: string,
+  input: string,
+  marker: string,
+  timeout: number,
+): Promise<string> {
+  const consolePicker = page.getByRole('combobox', { name: 'Console appliance' });
+  await consolePicker.selectOption(nodeId);
+  const command = page.getByRole('textbox', { name: 'Terminal command' });
+  const terminal = page.locator('.console-panel .terminal-output');
+  const lines = terminal.locator('.terminal-line');
+  const initialLineCount = await lines.count();
+  await expect(command).toBeEnabled();
+  await command.fill(input);
+  await command.press('Enter');
+  await expect(terminal).toContainText(marker, { timeout });
+  const allLines = await lines.allInnerTexts();
+  return allLines.slice(initialLineCount).join('\n').replaceAll('\r', '');
+}
+
+function parseNamespaceSnapshot(output: string, nodeId: string): NamespaceSnapshot {
+  const kinds: readonly NamespaceKind[] = ['pid', 'mnt', 'net', 'uts', 'ipc', 'cgroup', 'time'];
+  const values = new Map<NamespaceKind, string>();
+  for (const match of output.matchAll(/^NS (pid|mnt|net|uts|ipc|cgroup|time) ([a-z_]+:\[\d+\])$/gm)) {
+    values.set(match[1] as NamespaceKind, match[2]);
+  }
+  const missing = kinds.filter((kind) => !values.has(kind));
+  if (missing.length > 0) {
+    throw new Error(`${nodeId} did not report valid ${missing.join(', ')} namespace identities:\n${output}`);
+  }
+  return Object.fromEntries(kinds.map((kind) => [kind, values.get(kind)!])) as NamespaceSnapshot;
+}
+
+function requireNamespaceSnapshot(
+  snapshots: ReadonlyMap<string, NamespaceSnapshot>,
+  nodeId: string,
+): NamespaceSnapshot {
+  const snapshot = snapshots.get(nodeId);
+  if (snapshot === undefined) throw new Error(`Missing namespace snapshot for ${nodeId}`);
+  return snapshot;
+}
+
+function expectNamespacesIsolated(left: NamespaceSnapshot, right: NamespaceSnapshot): void {
+  const kinds: readonly NamespaceKind[] = ['pid', 'mnt', 'net', 'uts', 'ipc', 'cgroup', 'time'];
+  for (const kind of kinds) {
+    expect(left[kind], `${kind} namespace must be isolated per appliance`).not.toBe(right[kind]);
+  }
+}
+
+function shellCompletion(marker: string): string {
+  const pivot = Math.max(1, Math.floor(marker.length / 2));
+  return `printf '%s%s\\n' ${shellQuote(marker.slice(0, pivot))} ${shellQuote(marker.slice(pivot))}`;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+async function attachNativeFailureDiagnostics(
+  page: Page,
+  testInfo: TestInfo,
+  messages: readonly string[],
+): Promise<void> {
+  const attachText = async (name: string, body: string) => {
+    const path = testInfo.outputPath(name);
+    await writeFile(path, body.slice(-200_000));
+    await testInfo.attach(name, { path, contentType: 'text/plain' });
+  };
+
+  try {
+    const screenshotPath = testInfo.outputPath('native-ui.png');
+    await page.screenshot({ path: screenshotPath, fullPage: true, timeout: 5_000 });
+    await testInfo.attach('native-ui.png', { path: screenshotPath, contentType: 'image/png' });
+  } catch (error) {
+    await attachText('native-ui-screenshot-error.txt', String(error));
+  }
+
+  try {
+    const status = await page.evaluate(async () => {
+      const response = await fetch('runtime/status.json', { cache: 'no-store' });
+      return { status: response.status, body: await response.text() };
+    });
+    await attachText('native-runtime-status.txt', `${status.status}\n${status.body}`);
+  } catch (error) {
+    await attachText('native-runtime-status-error.txt', String(error));
+  }
+
+  try {
+    await attachText('native-ui-state.txt', await page.locator('body').innerText({ timeout: 3_000 }));
+  } catch (error) {
+    await attachText('native-ui-state-error.txt', String(error));
+  }
+
+  const nativeFabricReady = await page.getByText(/Native fabric is running/).first().isVisible().catch(() => false);
+  for (const probe of nativeNodeProbes) {
+    try {
+      const picker = page.getByRole('combobox', { name: 'Console appliance' });
+      await picker.selectOption(probe.nodeId, { timeout: 3_000 });
+      const terminal = page.locator('.console-panel .terminal-output');
+      await attachText(`${probe.nodeId}-console-before.txt`, await terminal.innerText({ timeout: 3_000 }));
+      const diagnosticErrors: string[] = [];
+      if (nativeFabricReady) {
+        for (const phase of nativeDiagnosticCommands(probe)) {
+          try {
+            await runNativeCommand(page, probe.nodeId, phase.input, phase.marker, 8_000);
+          } catch (error) {
+            diagnosticErrors.push(`${phase.marker}: ${conciseError(error)}`);
+            break;
+          }
+        }
+      }
+      await attachText(
+        `${probe.nodeId}-diagnostics.txt`,
+        `${await terminal.innerText({ timeout: 3_000 })}${diagnosticErrors.length === 0
+          ? ''
+          : `\n\n[diagnostic commands that did not complete]\n${diagnosticErrors.join('\n')}`}`,
+      );
+    } catch (error) {
+      await attachText(`${probe.nodeId}-diagnostics-error.txt`, String(error));
+    }
+  }
+
+  try {
+    await page.getByRole('button', { name: /Events/ }).click({ timeout: 3_000 });
+    await attachText('native-events.txt', await page.locator('.activity-panel').innerText({ timeout: 3_000 }));
+  } catch (error) {
+    await attachText('native-events-error.txt', String(error));
+  }
+
+  try {
+    const [download] = await Promise.all([
+      page.waitForEvent('download', { timeout: 5_000 }),
+      page.getByRole('button', { name: 'Export PCAPNG' }).click({ timeout: 3_000 }),
+    ]);
+    const path = await download.path();
+    if (path === null) throw new Error('Failure PCAPNG download did not produce a local path');
+    const attachmentPath = testInfo.outputPath('native-failure.pcapng');
+    await download.saveAs(attachmentPath);
+    await testInfo.attach('native-failure.pcapng', {
+      path: attachmentPath,
+      contentType: 'application/vnd.tcpdump.pcap',
+    });
+  } catch (error) {
+    await attachText('native-failure-pcapng-error.txt', String(error));
+  }
+  await attachText('browser-diagnostics.txt', messages.length > 0 ? messages.join('\n') : '(no browser diagnostics recorded)');
+}
+
+function nativeDiagnosticCommands(probe: NativeNodeProbe): readonly NativeProbePhase[] {
+  const phases: Array<readonly [string, readonly string[]]> = [
+    ['IDENTITY', [
+      "printf '%s\\n' '=== ANYCAST LAB NATIVE DIAGNOSTICS: identity ==='",
+      'hostname 2>&1',
+      'printf "shell-pid=%s\\n" "$$"',
+      'for namespace in pid mnt net uts ipc cgroup time; do printf "NS %s " "$namespace"; readlink "/proc/self/ns/$namespace" 2>&1; done',
+    ]],
+    ['LINKS', [
+      "printf '%s\\n' '=== links and addresses ==='",
+      'ip -details -statistics link show 2>&1',
+      'ip -details address show 2>&1',
+    ]],
+    ['ROUTES', [
+      "printf '%s\\n' '=== routes ==='",
+      'ip -4 route show table all 2>&1',
+      'ip -6 route show table all 2>&1',
+    ]],
+    ['RESOURCES', [
+      "printf '%s\\n' '=== processes, memory, and cgroup ==='",
+      'ps 2>&1',
+      'free 2>&1',
+      'cat /proc/self/cgroup 2>&1',
+      'for file in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.current /sys/fs/cgroup/pids.max; do if [ -r "$file" ]; then printf "%s=" "$file"; cat "$file"; fi; done',
+    ]],
+  ];
+  if (probe.daemon === 'bird') {
+    phases.push(['BIRD', [
+      "printf '%s\\n' '=== bird ==='",
+      'birdc show status 2>&1',
+      'birdc show protocols all 2>&1',
+    ]]);
+  } else {
+    phases.push(['FRR-FILES', [
+      "printf '%s\\n' '=== frr runtime files ==='",
+      'for file in /run/anycastlab/frr.ready /run/anycastlab/entrypoint.failure /run/anycastlab/frr-status.out /run/anycastlab/frr-start.out /run/anycastlab/frr-start.done /run/anycastlab/frr-start.pid /run/frr/*.pid /var/log/frr/*; do if [ -f "$file" ]; then printf "FILE %s (%s bytes)\\n" "$file" "$(wc -c < "$file")"; tail -n 80 "$file" 2>&1; fi; done',
+    ]]);
+    phases.push(['FRR-CONTROL', [
+      "printf '%s\\n' '=== frr control ==='",
+      'cat /tmp/anycastlab-test-frr-native-daemon 2>&1',
+      "vtysh -c 'show version' 2>&1",
+      "vtysh -c 'show daemons' 2>&1",
+    ]]);
+  }
+  return phases.map(([phase, commands]) => (
+    nativeProbePhase(probe.nodeId, `DIAGNOSTIC-${phase}`, commands)
+  ));
+}
+
+function conciseError(error: unknown): string {
+  const value = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return value.replaceAll('\r', '').split('\n').slice(0, 3).join(' ').slice(0, 1_000);
+}
 
 function requirePgoNativeIdentity(status: NativeRuntimeStatus | null): PgoNativeIdentity {
   if (status === null) {

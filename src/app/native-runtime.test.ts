@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { V86_IMAGE_BUILD_ID } from '../appliances/v86';
 import {
   loadNativeRuntimeAvailability,
   nativeMemoryEstimate,
@@ -13,13 +14,13 @@ describe('native runtime deployment status', () => {
       schemaVersion: 1,
       nativeV86: true,
       manifestSha256: digest,
-      buildId: 'image-r1',
+      buildId: V86_IMAGE_BUILD_ID,
       memoryBytes: 128 * 1024 * 1024,
     }, 'https://guide.example/lab/')).toEqual({
       available: true,
       manifestUrl: 'https://guide.example/lab/runtime/v86/manifest.json',
       manifestSha256: digest,
-      buildId: 'image-r1',
+      buildId: V86_IMAGE_BUILD_ID,
       memoryBytes: 128 * 1024 * 1024,
     });
   });
@@ -30,7 +31,7 @@ describe('native runtime deployment status', () => {
       nativeV86: true,
       manifestUrl: 'https://assets.example/v86/sha256/abc/manifest.json',
       manifestSha256: digest,
-      buildId: 'image-r1',
+      buildId: V86_IMAGE_BUILD_ID,
       memoryBytes: 128 * 1024 * 1024,
     }, 'https://guide.example/lab/')).toMatchObject({
       available: true,
@@ -48,9 +49,10 @@ describe('native runtime deployment status', () => {
   it.each([
     [{ schemaVersion: 2, nativeV86: false }, 'Unsupported native runtime status schema'],
     [{ schemaVersion: 1 }, 'missing nativeV86'],
-    [{ schemaVersion: 1, nativeV86: true, manifestSha256: 'bad', buildId: 'r1', memoryBytes: 1 }, 'invalid manifest digest'],
+    [{ schemaVersion: 1, nativeV86: true, manifestSha256: 'bad', buildId: V86_IMAGE_BUILD_ID, memoryBytes: 1 }, 'invalid manifest digest'],
     [{ schemaVersion: 1, nativeV86: true, manifestSha256: digest, buildId: '', memoryBytes: 1 }, 'invalid build id'],
-    [{ schemaVersion: 1, nativeV86: true, manifestSha256: digest, buildId: 'r1', memoryBytes: 0 }, 'invalid memory size'],
+    [{ schemaVersion: 1, nativeV86: true, manifestSha256: digest, buildId: 'old-build', memoryBytes: 1 }, 'incompatible build'],
+    [{ schemaVersion: 1, nativeV86: true, manifestSha256: digest, buildId: V86_IMAGE_BUILD_ID, memoryBytes: 0 }, 'invalid memory size'],
   ])('rejects malformed deployment metadata %#', (status, message) => {
     expect(() => parseNativeRuntimeStatus(status, 'https://guide.example/lab/')).toThrow(message);
   });
@@ -85,12 +87,12 @@ describe('native runtime deployment status', () => {
       schemaVersion: 1,
       nativeV86: true,
       manifestSha256: digest,
-      buildId: 'image-r1',
+      buildId: V86_IMAGE_BUILD_ID,
       memoryBytes: 64 * 1024 * 1024,
     }));
     await expect(loadNativeRuntimeAvailability('https://guide.example/lab', fetchImplementation)).resolves.toMatchObject({
       available: true,
-      buildId: 'image-r1',
+      buildId: V86_IMAGE_BUILD_ID,
     });
     expect(fetchImplementation).toHaveBeenCalledWith(
       'https://guide.example/lab/runtime/status.json',
@@ -110,7 +112,7 @@ describe('native runtime deployment status', () => {
           nativeV86: true,
           manifestUrl: 'https://assets.example/v86/objects/sha256/abc/manifest.json',
           manifestSha256: digest,
-          buildId: 'image-r1',
+          buildId: V86_IMAGE_BUILD_ID,
           memoryBytes: 128 * 1024 * 1024,
         });
       }
@@ -121,7 +123,7 @@ describe('native runtime deployment status', () => {
       available: true,
       manifestUrl: 'https://assets.example/v86/objects/sha256/abc/manifest.json',
       manifestSha256: digest,
-      buildId: 'image-r1',
+      buildId: V86_IMAGE_BUILD_ID,
       memoryBytes: 128 * 1024 * 1024,
     });
     expect(fetchImplementation).toHaveBeenNthCalledWith(1, 'https://guide.example/lab/runtime/status.json', { cache: 'no-store' });
@@ -158,8 +160,8 @@ describe('native runtime deployment status', () => {
 });
 
 describe('native memory estimate', () => {
-  it('reports aggregate VM memory and singularizes one VM', () => {
-    expect(nativeMemoryEstimate(6, 128 * 1024 * 1024)).toBe('768 MiB for 6 VMs');
-    expect(nativeMemoryEstimate(1, 128 * 1024 * 1024)).toBe('128 MiB for 1 VM');
+  it('reports one VM allocation shared by all namespace-isolated nodes', () => {
+    expect(nativeMemoryEstimate(6, 128 * 1024 * 1024)).toBe('128 MiB shared by 6 nodes');
+    expect(nativeMemoryEstimate(1, 128 * 1024 * 1024)).toBe('128 MiB shared by 1 node');
   });
 });

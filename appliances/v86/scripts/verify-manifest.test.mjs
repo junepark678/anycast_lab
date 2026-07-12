@@ -5,6 +5,10 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  createFilesystemMetadata,
+  FILESYSTEM_LAYER_DEFINITIONS,
+} from './filesystem-layout.mjs';
+import {
   MAX_RELEASE_ARTIFACT_BYTES,
   PINNED_V86_MANIFEST_IDENTITY,
   verifyV86ArtifactBundle,
@@ -31,6 +35,13 @@ async function fixture() {
     await writeFile(resolve(directory, file), bytes);
     artifacts.push({ id, file, size: bytes.byteLength, sha256: digest(bytes) });
   }
+  const filesystemArtifacts = [];
+  for (const { id, file } of FILESYSTEM_LAYER_DEFINITIONS) {
+    const bytes = Buffer.from(`filesystem:${id}`);
+    await writeFile(resolve(directory, file), bytes);
+    filesystemArtifacts.push({ id, size: bytes.byteLength, sha256: digest(bytes) });
+  }
+  const filesystem = createFilesystemMetadata(filesystemArtifacts);
   const manifest = {
     ...PINNED_V86_MANIFEST_IDENTITY,
     toolchain: { ...PINNED_V86_MANIFEST_IDENTITY.toolchain },
@@ -42,10 +53,12 @@ async function fixture() {
       frrProfileSha256: '4'.repeat(64),
     },
     machine: {
+      model: 'shared-namespaces',
       memoryBytes: 128 * 1024 * 1024,
       vgaMemoryBytes: 2 * 1024 * 1024,
       trunkMtu: 65_535,
     },
+    filesystem,
     artifacts,
   };
   const manifestPath = resolve(directory, 'manifest.json');
@@ -62,6 +75,8 @@ describe('verifyV86ArtifactBundle', () => {
     const { manifestPath } = await fixture();
     const verified = await verifyV86ArtifactBundle(manifestPath);
     expect(verified.artifacts.map((artifact) => artifact.file)).toEqual(definitions.map(([, file]) => file));
+    expect(verified.filesystemLayers.map((layer) => layer.id))
+      .toEqual(FILESYSTEM_LAYER_DEFINITIONS.map((layer) => layer.id));
     await expect(verifyV86ArtifactBundle(manifestPath, {
       expectedManifestSha256: verified.manifestSha256,
     })).resolves.toMatchObject({ manifestSha256: verified.manifestSha256 });
@@ -95,6 +110,38 @@ describe('verifyV86ArtifactBundle', () => {
     await expect(verifyV86ArtifactBundle(manifestPath)).rejects.toThrow('Artifact verification failed');
   });
 
+  it('requires and verifies the content-addressed filesystem layer graph for release', async () => {
+    const { manifest, manifestPath } = await fixture();
+    delete manifest.filesystem;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await expect(verifyV86ArtifactBundle(manifestPath, { requiredFilesystem: true }))
+      .rejects.toThrow('requires filesystem layer metadata');
+
+    const restored = await fixture();
+    restored.manifest.filesystem.layers[2].object = 'blobs/sha256/wrong.squashfs';
+    await writeFile(restored.manifestPath, JSON.stringify(restored.manifest));
+    await expect(verifyV86ArtifactBundle(restored.manifestPath))
+      .rejects.toThrow('.object must be');
+
+    const corrupted = await fixture();
+    await writeFile(resolve(corrupted.directory, 'rootfs-frr.squashfs'), 'corrupt');
+    await expect(verifyV86ArtifactBundle(corrupted.manifestPath))
+      .rejects.toThrow('Filesystem layer verification failed: frr');
+
+    const oversized = await fixture();
+    oversized.manifest.filesystem.layers[0].size = MAX_RELEASE_ARTIFACT_BYTES + 1;
+    oversized.manifest.filesystem.cache.key = createFilesystemMetadata(
+      oversized.manifest.filesystem.layers.map((layer) => ({
+        id: layer.id,
+        size: layer.size,
+        sha256: layer.sha256,
+      })),
+    ).cache.key;
+    await writeFile(oversized.manifestPath, JSON.stringify(oversized.manifest));
+    await expect(verifyV86ArtifactBundle(oversized.manifestPath))
+      .rejects.toThrow('Filesystem layer complete exceeds');
+  });
+
   it('rejects a bundle that the browser manifest contract cannot consume', async () => {
     const { manifest, manifestPath } = await fixture();
     delete manifest.v86;
@@ -105,6 +152,12 @@ describe('verifyV86ArtifactBundle', () => {
     manifest.machine.trunkMtu = 1500;
     await writeFile(manifestPath, JSON.stringify(manifest));
     await expect(verifyV86ArtifactBundle(manifestPath)).rejects.toThrow('between 1504 and 65535');
+
+    manifest.machine.trunkMtu = 65_535;
+    manifest.machine.model = 'per-node-vm';
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await expect(verifyV86ArtifactBundle(manifestPath))
+      .rejects.toThrow('shared-namespaces appliance contract');
   });
 
   it('requires pinned O3 ThinLTO and complete PGO-use provenance', async () => {

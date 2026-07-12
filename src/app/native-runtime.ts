@@ -1,3 +1,5 @@
+import { V86_IMAGE_BUILD_ID } from '../appliances/v86/manifest';
+
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 
 export type NativeRuntimeAvailability =
@@ -35,6 +37,11 @@ export function parseNativeRuntimeStatus(
   }
   if (typeof status.buildId !== 'string' || status.buildId.length === 0) {
     throw new Error('Native runtime status has an invalid build id');
+  }
+  if (status.buildId !== V86_IMAGE_BUILD_ID) {
+    throw new Error(
+      `Native runtime status publishes incompatible build ${status.buildId}; expected ${V86_IMAGE_BUILD_ID}`,
+    );
   }
   if (!Number.isSafeInteger(status.memoryBytes) || Number(status.memoryBytes) <= 0) {
     throw new Error('Native runtime status has an invalid memory size');
@@ -116,8 +123,8 @@ function parseRuntimeUrl(value: unknown, baseUrl: string, label: string): string
 
 export function nativeMemoryEstimate(
   nodeCount: number,
-  memoryBytesPerNode: number,
+  sharedMemoryBytes: number,
 ): string {
-  const totalMebibytes = Math.ceil((nodeCount * memoryBytesPerNode) / (1024 * 1024));
-  return `${totalMebibytes} MiB for ${nodeCount} VM${nodeCount === 1 ? '' : 's'}`;
+  const totalMebibytes = Math.ceil(sharedMemoryBytes / (1024 * 1024));
+  return `${totalMebibytes} MiB shared by ${nodeCount} node${nodeCount === 1 ? '' : 's'}`;
 }

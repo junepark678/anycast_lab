@@ -63,7 +63,8 @@ if [[ ! $recorded_digest =~ ^[a-f0-9]{64}$ ]]; then
   printf 'Invalid appliance manifest digest\n' >&2
   exit 1
 fi
-verified_line=$(node "$ROOT/scripts/verify-manifest.mjs" "$MANIFEST_PATH" --require-pgo-use)
+verified_line=$(node "$ROOT/scripts/verify-manifest.mjs" \
+  "$MANIFEST_PATH" --require-pgo-use --require-filesystem)
 if [[ "$verified_line" != "$recorded_digest  manifest.json" ]]; then
   printf 'Appliance manifest.sha256 does not match the verified bundle\n' >&2
   exit 1
@@ -214,6 +215,26 @@ publish_immutable "$ARTIFACT_DIR/router-bzimage.bin" "$object_root/router-bzimag
 publish_immutable "$ARTIFACT_DIR/seabios.bin" "$object_root/seabios.bin" application/octet-stream
 publish_immutable "$ARTIFACT_DIR/vgabios.bin" "$object_root/vgabios.bin" application/octet-stream
 publish_immutable "$ARTIFACT_DIR/v86.wasm" "$object_root/v86.wasm" application/wasm
+
+# Filesystem blobs are addressed by their own digest instead of the enclosing
+# manifest digest. Unchanged base/routing/tool layers are therefore reused
+# across releases, PGO rebuilds and channel publications.
+while IFS=$'\t' read -r layer_file layer_object; do
+  if [[ -z $layer_file || -z $layer_object ]]; then
+    printf 'Verified filesystem manifest produced an invalid publish entry\n' >&2
+    exit 1
+  fi
+  publish_immutable \
+    "$ARTIFACT_DIR/$layer_file" \
+    "$OCI_OBJECT_PREFIX/$layer_object" \
+    application/octet-stream
+done < <(node -e '
+  const { readFileSync } = require("node:fs");
+  const manifest = JSON.parse(readFileSync(process.argv[1], "utf8"));
+  for (const layer of manifest.filesystem.layers) {
+    process.stdout.write(`${layer.file}\t${layer.object}\n`);
+  }
+' "$MANIFEST_PATH")
 
 # Make the immutable bundle discoverable only after the anonymous browser path
 # returns the exact manifest bytes with a usable CORS response.

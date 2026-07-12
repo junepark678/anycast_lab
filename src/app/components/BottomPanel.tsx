@@ -229,7 +229,7 @@ export function BottomPanel({
                   <button className="button button--run" type="submit" disabled={!source}>{runtimeMode === 'native' ? 'Run traceroute' : 'Trace packet'}</button>
                 </form>
                 <div className="trace-hops">
-                  {trace.length === 0 ? <div className="empty-inline">{runtimeMode === 'native' ? 'Run traceroute inside a client VM. Output stays visible in the separate console; Ethernet frames remain available as PCAPNG.' : 'Run a trace to see each forwarding decision.'}</div> : trace.map((hop) => (
+                  {trace.length === 0 ? <div className="empty-inline">{runtimeMode === 'native' ? 'Run traceroute inside a client namespace. Output stays visible in the separate console; Ethernet frames remain available as PCAPNG.' : 'Run a trace to see each forwarding decision.'}</div> : trace.map((hop) => (
                     <article key={`${hop.index}-${hop.nodeId}`} className={`trace-hop trace-hop--${hop.outcome}`}>
                       <span className="trace-hop__index">{hop.index}</span>
                       <div><strong>{hop.nodeLabel}</strong><p>{hop.explanation}</p><small>{hop.ingress ?? 'local'} → {hop.egress ?? hop.outcome}{hop.matchedPrefix && <> · <code>{hop.matchedPrefix}</code></>}</small></div>

@@ -32,7 +32,10 @@ import {
   loadVerifiedV86Artifacts,
   sha256Hex,
 } from './manifest';
+import { validateV86BootRequest } from './shared-guest-contract';
 import { assertNormalizedAbsolutePath, createUstarArchive, readUstarArchive } from './tar';
+
+export { validateV86BootRequest } from './shared-guest-contract';
 
 const BOOTSTRAP_ARCHIVE_PATH = '/anycastlab-bootstrap.tar';
 const INPUT_ARCHIVE_PATH = '/anycastlab-in.tar';
@@ -42,7 +45,7 @@ const LAB_VLAN_BASE = 100;
 const MAX_SERIAL_BACKLOG = 64 * 1024;
 const PGO_GENERATE_GUEST_BOOT_TIMEOUT_MS = 300_000;
 const PGO_COLLECTION_TIMEOUT_MS = 300_000;
-const GUEST_READINESS_ATTEMPTS = 480;
+const GUEST_READINESS_ATTEMPTS = 120;
 const MAX_PGO_RAW_PROFILE_BYTES = 64 * 1024 * 1024;
 const MAX_PGO_PROFILE_ARCHIVE_BYTES = MAX_PGO_RAW_PROFILE_BYTES + 1024 * 1024;
 const MAX_PGO_PROFILE_ENTRIES = 128;
@@ -112,6 +115,8 @@ interface TerminalSession {
 
 const NATIVE_LIMITATIONS = [
   'v86 advances on browser wall-clock time rather than the deterministic lab clock',
+  'Native nodes share one Linux kernel and are isolated with PID, mount, network, UTS, IPC, cgroup, and time namespaces',
+  'Node namespaces are a fidelity and resource boundary for one trusted browser user, not hostile multi-tenant isolation',
   'All guest interfaces are multiplexed over a private 802.1Q trunk to v86 net0',
   'The guest is 32-bit i686 because v86 does not emulate x86-64 CPU extensions',
   'Snapshots require the exact same v86 package, VM image build, and artifact manifest',
@@ -123,7 +128,7 @@ export function v86RuntimeDescriptor(kind: V86ApplianceKind): ApplianceRuntimeDe
   const client = kind === 'client';
   return {
     runtimeId: bird ? 'bird-2.15.1-v86' : client ? 'linux-client-v86' : 'frr-10.5.1-v86',
-    displayName: bird ? 'BIRD 2.15.1 (Linux VM)' : client ? 'Linux client (VM)' : 'FRRouting 10.5.1 (Linux VM)',
+    displayName: bird ? 'BIRD 2.15.1 (shared Linux VM)' : client ? 'Linux client (shared VM)' : 'FRRouting 10.5.1 (shared Linux VM)',
     kind,
     fidelity: 'native',
     upstreamVersion: bird ? PINNED_BIRD_VERSION : client ? null : PINNED_FRR_VERSION,
@@ -144,7 +149,7 @@ export function v86RuntimeDescriptor(kind: V86ApplianceKind): ApplianceRuntimeDe
         : ['BGP', 'OSPFv2', 'OSPFv3', 'IS-IS', 'BFD', 'RIP', 'Babel', 'PIM', 'Static'],
     },
     limitations: client
-      ? [...NATIVE_LIMITATIONS, 'Service addresses receive kernel ICMP; application servers must be started from the serial shell']
+      ? [...NATIVE_LIMITATIONS, 'Service addresses receive kernel ICMP; application servers must be started from the node terminal']
       : NATIVE_LIMITATIONS,
   };
 }
@@ -245,7 +250,7 @@ export class V86ApplianceRuntime implements ApplianceRuntime {
       throw new Error(`Host ABI ${host.abiVersion} is incompatible with ${APPLIANCE_HOST_ABI_VERSION}`);
     }
     try {
-      validateBootRequest(request);
+      validateV86BootRequest(request);
       this.#host = host;
       this.#boot = copyBootRequest(request);
       this.#files = new Map(request.files.map((file) => [file.path, copyFile(file)]));
@@ -274,9 +279,17 @@ export class V86ApplianceRuntime implements ApplianceRuntime {
         bios: { buffer: toArrayBuffer(this.#artifacts.artifacts.bios) },
         vga_bios: { buffer: toArrayBuffer(this.#artifacts.artifacts['vga-bios']) },
         bzimage: { buffer: toArrayBuffer(this.#artifacts.artifacts.bzimage) },
+        hda: {
+          buffer: filesystemBlobAsFile(
+            this.#artifacts.filesystems.complete?.blob,
+            'rootfs-complete.squashfs',
+          ),
+          async: true,
+        },
         cmdline:
           'console=ttyS0,115200n8 tsc=reliable mitigations=off random.trust_cpu=on ' +
-          'panic=-1 oops=panic net.ifnames=0',
+          'dummy.numdummies=0 ifb.numifbs=0 ' +
+          'panic=-1 oops=panic net.ifnames=0 root=/dev/sda rootfstype=squashfs ro',
         filesystem: {},
         net_device: { type: 'virtio', mtu: this.#artifacts.manifest.machine.trunkMtu },
         virtio_console: true,
@@ -804,37 +817,6 @@ export function createV86RuntimeFactories(
   ];
 }
 
-function validateBootRequest(request: ApplianceBootRequest): void {
-  if (request.interfaces.length > 4095 - LAB_VLAN_BASE) {
-    throw new Error(`v86 appliances support at most ${4095 - LAB_VLAN_BASE} interfaces`);
-  }
-  const paths = new Set<string>();
-  for (const file of request.files) {
-    assertNormalizedAbsolutePath(file.path);
-    if (paths.has(file.path)) throw new Error(`Duplicate appliance file: ${file.path}`);
-    if (file.path === '/run/anycastlab/start.sh') throw new Error('Reserved appliance file path');
-    paths.add(file.path);
-  }
-  const interfaceIds = new Set<string>();
-  const interfaceNames = new Set<string>();
-  for (const value of request.interfaces) {
-    if (!/^[a-zA-Z0-9_.-]{1,15}$/.test(value.name) || value.name === 'lo' || value.name === 'labtrunk0') {
-      throw new Error(`Invalid or reserved Linux interface name: ${value.name}`);
-    }
-    if (interfaceIds.has(value.id)) throw new Error(`Duplicate interface id: ${value.id}`);
-    if (interfaceNames.has(value.name)) throw new Error(`Duplicate interface name: ${value.name}`);
-    if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(value.mac)) throw new Error(`Invalid MAC address: ${value.mac}`);
-    if (!Number.isSafeInteger(value.mtu) || value.mtu < 576 || value.mtu > 65_531) {
-      throw new Error(`Invalid interface MTU: ${value.mtu}`);
-    }
-    interfaceIds.add(value.id);
-    interfaceNames.add(value.name);
-  }
-  for (const name of Object.keys(request.environment)) {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`Invalid environment variable name: ${name}`);
-  }
-}
-
 function createGuestStartScript(
   boot: ApplianceBootRequest,
   interfaces: readonly ApplianceInterfaceSpec[],
@@ -904,13 +886,13 @@ function createGuestStartScript(
     ') </dev/null >/dev/ttyS0 2>&1 &',
     'appliance_pid=$!',
     'echo "$appliance_pid" >/run/anycastlab/appliance.pid',
-    'sleep 0.1',
+    'sleep 1',
     "ready=0",
     "attempt=0",
     `while kill -0 "$appliance_pid" 2>/dev/null && [ "$attempt" -lt ${GUEST_READINESS_ATTEMPTS} ]; do`,
     `  if ${readiness}; then ready=1; break; fi`,
     '  attempt=$((attempt + 1))',
-    '  sleep 0.25',
+    `  if [ "$attempt" -lt ${GUEST_READINESS_ATTEMPTS} ]; then sleep 1; fi`,
     'done',
     'if ! kill -0 "$appliance_pid" 2>/dev/null; then',
     '  wait "$appliance_pid" || status=$?',
@@ -1012,6 +994,14 @@ function defaultRevokeObjectUrl(url: string): void {
   URL.revokeObjectURL(url);
 }
 
+function filesystemBlobAsFile(blob: Blob | undefined, name: string): File {
+  if (blob === undefined) throw new Error(`Required v86 filesystem artifact is missing: ${name}`);
+  if (typeof File === 'undefined') throw new Error('Browser File support is required for paged v86 filesystems');
+  return blob instanceof File
+    ? blob
+    : new File([blob], name, { type: 'application/vnd.squashfs' });
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -1025,7 +1015,7 @@ function cleanSerialTail(bytes: Uint8Array): string {
     .trim();
 }
 
-async function validatePgoProfileArchive(
+export async function validatePgoProfileArchive(
   archive: Uint8Array,
   kind: Exclude<V86ApplianceKind, 'client'>,
 ): Promise<readonly V86PgoProfileFile[]> {

@@ -40,11 +40,13 @@ verify_final_elf() {
   provenance_file=$2
   pgo_scope=$3
   expected_profile=${4:-}
+  elf_role=${5:-program}
   if [ ! -f "$provenance_file" ]; then
     printf 'Missing unstripped optimization provenance ELF: %s\n' "$provenance_file" >&2
     exit 1
   fi
   header=$($READELF -h "$file")
+  dynamic=$($READELF --wide --dynamic "$file")
   comments=$($READELF -p .comment "$provenance_file")
   symbols=$($READELF --wide --dyn-syms "$file")
   final_sections=$($READELF --wide --sections "$file")
@@ -52,10 +54,26 @@ verify_final_elf() {
   provenance_symbols=$($LLVM_NM "$provenance_file")
   printf '%s\n' "$header" | grep -Eq 'Class:[[:space:]]+ELF32'
   printf '%s\n' "$header" | grep -Eq 'Machine:[[:space:]]+Intel 80386'
+  printf '%s\n' "$header" | grep -Eq 'Type:[[:space:]]+DYN([[:space:]]|$)'
+  for relr_tag in RELR RELRSZ RELRENT; do
+    if ! printf '%s\n' "$dynamic" | grep -Eq "\\($relr_tag\\)([[:space:]]|$)"; then
+      printf 'ELF lacks packed relative relocation tag %s: %s\n' "$relr_tag" "$file" >&2
+      exit 1
+    fi
+  done
+  if [ "$elf_role" = program ] && \
+    ! printf '%s\n' "$dynamic" | grep -Eq '\(FLAGS_1\).*([[:space:]]|\])PIE([[:space:]]|$)'; then
+    printf 'Executable is not a position-independent PIE: %s\n' "$file" >&2
+    exit 1
+  fi
   printf '%s\n' "$comments" | grep -Fq "clang version $LLVM_VERSION"
   printf '%s\n' "$comments" | grep -Fq "Linker: LLD $LLVM_VERSION"
   printf '%s\n' "$symbols" | grep -Fq "__anycast_clang_$LLVM_VERSION_SYMBOL"
   printf '%s\n' "$symbols" | grep -Fq '__anycast_o3_thinlto'
+  if printf '%s\n' "$final_sections" | grep -Fq '.GCC.command.line'; then
+    printf 'Packed target ELF retains Clang command-line provenance: %s\n' "$file" >&2
+    exit 1
+  fi
 
   pgo_symbols=$(printf '%s\n' "$symbols" | grep -F '__anycast_pgo_' || :)
   if [ "$pgo_scope" = selected ]; then
@@ -139,6 +157,7 @@ for config in "$BIRD_CONFIG" "$FRR_CONFIG"; do
   require_text "$config" '-O3'
   require_text "$config" '-flto=thin'
   require_text "$config" '-fuse-ld=lld'
+  require_text "$config" '-Wl,-z,pack-relative-relocs'
 done
 
 for config in "$BIRD_CONFIG" "$FRR_CONFIG"; do
@@ -256,7 +275,7 @@ for pair in $FRR_LIBRARIES; do
     esac
   fi
   verify_final_elf \
-    "$file" "$OUTPUT/build/frr-$FRR_VERSION/$build_library" "$pgo_scope" "$expected_profile"
+    "$file" "$OUTPUT/build/frr-$FRR_VERSION/$build_library" "$pgo_scope" "$expected_profile" shared
   FRR_OWNED_ELFS="$FRR_OWNED_ELFS usr/$library"
   verified_frr_libraries=$((verified_frr_libraries + 1))
 done

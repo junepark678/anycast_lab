@@ -11,6 +11,7 @@ describe('Clang daemon optimization build contract', () => {
     expect(makefile).toContain('ANYCAST_COMMON_CFLAGS =');
     expect(makefile).toContain('-O3 -march=$(ANYCAST_TARGET_CPU) -flto=thin');
     expect(makefile).toContain('-fuse-ld=lld');
+    expect(makefile).toContain('-Wl,-z,pack-relative-relocs');
     expect(makefile).toContain('--sysroot=$(STAGING_DIR)');
     expect(makefile).toContain('ANYCAST_LLD = $(HOST_DIR)/bin/ld.lld');
     expect(makefile).toContain('--ld-path=$(ANYCAST_LLD)');
@@ -34,9 +35,15 @@ describe('Clang daemon optimization build contract', () => {
     expect(makefile.match(/BR2_USE_CCACHE=0/g)).toHaveLength(4);
     expect(makefile).toContain('CFLAGS="$(ANYCAST_COMMON_CFLAGS) -D_GNU_SOURCE"');
     expect(makefile).toContain('CFLAGS="$(ANYCAST_COMMON_CFLAGS) -DFRR_XREF_NO_NOTE"');
+    expect(makefile).toContain('--enable-user=root');
+    expect(makefile).toContain('--enable-group=root');
+    expect(makefile).toContain('--enable-vty-group=root');
     expect(makefile).not.toContain('CFLAGS="$(ANYCAST_COMMON_CFLAGS) -D_GNU_SOURCE $(');
     expect(makefile).not.toContain('CFLAGS="$(ANYCAST_COMMON_CFLAGS) -DFRR_XREF_NO_NOTE $(');
     expect(makefile).toContain('$(BIRD_TARGET_CONFIGURE) $(FRR_TARGET_CONFIGURE): | anycast-clang-toolchain');
+    const defconfig = await readFile(resolve(root, 'buildroot/configs/anycast_lab_v86_defconfig'), 'utf8');
+    expect(defconfig).toContain('# BR2_PACKAGE_LIBCAP is not set');
+    expect(defconfig).not.toMatch(/^BR2_PACKAGE_LIBCAP=y$/m);
   });
 
   it('applies PGO only to trained BIRD and FRR build targets', async () => {
@@ -150,27 +157,54 @@ describe('Clang daemon optimization build contract', () => {
     }
   });
 
-  it('discards interactive client profiles only in instrumented guest shells', async () => {
-    const shell = await readFile(resolve(
+  it('discards interactive client profiles only in instrumented namespace terminals', async () => {
+    const supervisor = await readFile(resolve(
       root,
-      'buildroot/board/rootfs-overlay/usr/libexec/anycastlab-shell',
+      'buildroot/package/anycast-labd/src/labd.c',
     ), 'utf8');
-    expect(shell).toContain([
-      'if [ -f /etc/anycastlab/pgo-generate ]; then',
-      '  export LLVM_PROFILE_FILE=/dev/null',
-      'fi',
-      'exec /bin/sh',
-    ].join('\n'));
-    expect(shell.match(/export LLVM_PROFILE_FILE=\/dev\/null/g)).toHaveLength(1);
+    const terminal = supervisor.slice(
+      supervisor.indexOf('static void terminal_helper('),
+      supervisor.indexOf('static struct labd_terminal *find_terminal('),
+    );
+    expect(terminal).toContain('/etc/anycastlab/pgo-generate');
+    expect(terminal).toContain('setenv("LLVM_PROFILE_FILE", "/dev/null", 1)');
+    expect(terminal.indexOf('setenv("LLVM_PROFILE_FILE", "/dev/null", 1)'))
+      .toBeLessThan(terminal.indexOf('execl("/bin/sh"'));
   });
 
   it('allows instrumented daemons to stop and flush profiles under v86', async () => {
-    const agent = await readFile(resolve(
+    const supervisor = await readFile(resolve(
       root,
-      'buildroot/board/rootfs-overlay/usr/libexec/anycastlab-agent',
+      'buildroot/package/anycast-labd/src/labd.c',
     ), 'utf8');
-    expect(agent).toContain('PGO_STOP_ATTEMPTS=${ANYCASTLAB_PGO_STOP_ATTEMPTS:-600}');
-    expect(agent).toContain('sleep 0.25');
+    const collect = supervisor.slice(
+      supervisor.indexOf('if (strcmp(tokens[1], "COLLECT_PGO") == 0)'),
+      supervisor.indexOf('response_error(request_id, "UNKNOWN_COMMAND"'),
+    );
+    expect(collect.indexOf('stop_node(node, &error)'))
+      .toBeLessThan(collect.indexOf('export_pgo_profiles(node, &error)'));
+    expect(supervisor).toContain('kill(node->launcher_pid, SIGTERM)');
+    expect(supervisor).toContain('valid_pgo_name(entry->d_name, node->config.kind)');
+    expect(supervisor).toContain('total > 64U * 1024U * 1024U');
+  });
+
+  it('invalidates expensive daemon builds with the narrow source key and the selected optimization mode', async () => {
+    const build = await readFile(resolve(root, 'scripts/build-image.sh'), 'utf8');
+    const cacheKey = await readFile(resolve(root, 'scripts/appliance-cache-key.mjs'), 'utf8');
+
+    expect(cacheKey).toContain('export const DAEMON_CACHE_INPUTS');
+    expect(cacheKey).toContain('export async function computeDaemonCacheKey');
+    expect(cacheKey).toContain("command === '--daemons'");
+    expect(build).toContain('DAEMON_INPUT_SHA=$(node "$ROOT/scripts/appliance-cache-key.mjs" --daemons)');
+    expect(build).toContain('DAEMON_PROFILE_KEY=');
+    expect(build).toContain('if [ "$PGO_MODE" = use ]; then DAEMON_PROFILE_KEY=$PGO_BUILD_KEY; fi');
+    expect(build).toContain("DAEMON_OPTIMIZATION_KEY=$(printf '%s\\n%s\\n%s\\n' \\");
+    expect(build).toContain('"$DAEMON_INPUT_SHA" "$PGO_MODE" "$DAEMON_PROFILE_KEY" | sha256sum');
+    expect(build.match(/\$PGO_MODE:\$DAEMON_OPTIMIZATION_KEY/g)).toHaveLength(2);
+    expect(build).toContain('if [ "$PREVIOUS_OPTIMIZATION" != "$PGO_MODE:$DAEMON_OPTIMIZATION_KEY" ]; then');
+    expect(build).toContain("printf '%s\\n' \"$PGO_MODE:$DAEMON_OPTIMIZATION_KEY\" >\"$OPTIMIZATION_STAMP.tmp\"");
+    expect(build).toContain('mv "$OPTIMIZATION_STAMP.tmp" "$OPTIMIZATION_STAMP"');
+    expect(build).not.toContain('$PGO_MODE:$PGO_BUILD_KEY');
   });
 
   it('exposes fail-closed shell modes, profile validation, tool provenance, and manifest provenance', async () => {
@@ -188,8 +222,10 @@ describe('Clang daemon optimization build contract', () => {
     expect(build).toContain('if [ "$POST_BUILD_PROFILE_KEY" != "$PGO_BUILD_KEY" ]; then');
     expect(build).toContain('pgo-profile-set.mjs" frr-digest');
     expect(build).toContain('buildroot_make bird-dirclean frr-dirclean');
+    expect(build).toContain('buildroot_make anycast-labd-dirclean');
     expect(build).toContain('anycast-clang-toolchain');
     expect(build).toContain('verify-optimized-daemons.sh');
+    expect(build).toContain('verify-effective-config.mjs');
     for (const profile of [
       'frr-libfrr.profdata',
       'frr-libmgmt-be-nb.profdata',

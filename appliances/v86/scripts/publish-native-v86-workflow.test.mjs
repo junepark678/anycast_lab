@@ -152,9 +152,20 @@ describe('native v86 PGO publication workflow', () => {
     expect(step('Verify the instrumented native bundle')).not.toContain('--require-pgo-use');
     expect(step('Verify the optimized native bundle and profile provenance')).toContain('--require-pgo-use');
     expect(step('Verify the release bundle')).toContain('--require-pgo-use');
-    expect(publishJob).toContain('--require-pgo-use appliances/v86/dist/manifest.json');
+    expect(publishJob).toContain('--require-pgo-use --require-filesystem appliances/v86/dist/manifest.json');
+    expect(buildJob.match(/--require-filesystem appliances\/v86\/dist\/manifest\.json/g))
+      .toHaveLength(3);
     expect(workflow.match(/--require-pgo-use/g)).toHaveLength(3);
     expect(workflow).not.toContain('actions/attest');
+  });
+
+  it('carries every verified immutable filesystem layer into the isolated publish job', () => {
+    const upload = step('Upload the verified workflow artifact');
+    for (const layer of ['complete', 'base', 'bird', 'frr', 'toolbox']) {
+      expect(upload).toContain(`appliances/v86/dist/rootfs-${layer}.squashfs`);
+    }
+    expect(upload).toContain('if-no-files-found: error');
+    expect(upload).toContain('compression-level: 0');
   });
 
   it('requires a concrete native build identity before PGO training can run or write evidence', () => {

@@ -34,6 +34,8 @@ export interface V86EmulatorOptions {
   readonly bios: { readonly buffer: ArrayBuffer };
   readonly vga_bios: { readonly buffer: ArrayBuffer };
   readonly bzimage: { readonly buffer: ArrayBuffer };
+  /** Immutable SquashFS root, read lazily from an OPFS-backed File. */
+  readonly hda: { readonly buffer: File; readonly async: true };
   readonly cmdline: string;
   readonly filesystem: Record<string, never>;
   readonly net_device: {

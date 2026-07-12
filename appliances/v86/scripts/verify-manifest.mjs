@@ -4,12 +4,14 @@ import { readFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { validateFilesystemMetadata } from './filesystem-layout.mjs';
+
 export const MAX_RELEASE_ARTIFACT_BYTES = 512 * 1024 * 1024;
 
 export const PINNED_V86_MANIFEST_IDENTITY = Object.freeze({
   schemaVersion: 1,
   imageId: 'anycast-lab-router',
-  buildId: 'anycastlab-v86-br2026.02.3-r3',
+  buildId: 'anycastlab-v86-br2026.02.3-r4',
   sourceDateEpoch: 1_781_643_617,
   buildroot: Object.freeze({
     version: '2026.02.3',
@@ -71,7 +73,12 @@ function requirePowerOfTwo(value, label) {
  */
 export async function verifyV86ArtifactBundle(
   manifestInput,
-  { expectedManifestSha256, maxArtifactBytes = MAX_RELEASE_ARTIFACT_BYTES, requiredPgoMode } = {},
+  {
+    expectedManifestSha256,
+    maxArtifactBytes = MAX_RELEASE_ARTIFACT_BYTES,
+    requiredFilesystem = false,
+    requiredPgoMode,
+  } = {},
 ) {
   const manifestPath = resolve(manifestInput);
   const manifestBytes = await readFile(manifestPath);
@@ -135,6 +142,9 @@ export async function verifyV86ArtifactBundle(
     throw new Error(`Native bundle requires PGO mode ${requiredPgoMode}; received ${pgo.mode}`);
   }
   const machine = requireRecord(manifest.machine, 'machine');
+  if (machine.model !== 'shared-namespaces') {
+    throw new Error('machine.model must identify the shared-namespaces appliance contract');
+  }
   const memoryBytes = requirePowerOfTwo(machine.memoryBytes, 'machine.memoryBytes');
   requirePowerOfTwo(machine.vgaMemoryBytes, 'machine.vgaMemoryBytes');
   const trunkMtu = requirePositiveInteger(machine.trunkMtu, 'machine.trunkMtu');
@@ -181,6 +191,31 @@ export async function verifyV86ArtifactBundle(
   }
   if (remaining.size !== 0) throw new Error(`Missing artifacts: ${[...remaining.keys()].join(', ')}`);
 
+  let filesystem;
+  const filesystemLayers = [];
+  if (manifest.filesystem === undefined) {
+    if (requiredFilesystem) throw new Error('Native bundle requires filesystem layer metadata');
+  } else {
+    filesystem = validateFilesystemMetadata(manifest.filesystem);
+    for (const layer of filesystem.layers) {
+      if (layer.size > maxArtifactBytes) {
+        throw new Error(`Filesystem layer ${layer.id} exceeds the ${maxArtifactBytes}-byte release safety limit`);
+      }
+      const path = resolve(dirname(manifestPath), layer.file);
+      const bytes = await readFile(path);
+      const layerDigest = sha256(bytes);
+      if (bytes.byteLength !== layer.size || layerDigest !== layer.sha256) {
+        throw new Error(`Filesystem layer verification failed: ${layer.id}`);
+      }
+      filesystemLayers.push({
+        ...layer,
+        path,
+        size: bytes.byteLength,
+        sha256: layerDigest,
+      });
+    }
+  }
+
   return {
     manifestPath,
     manifest,
@@ -188,6 +223,8 @@ export async function verifyV86ArtifactBundle(
     manifestSha256,
     memoryBytes,
     artifacts,
+    filesystem,
+    filesystemLayers,
   };
 }
 
@@ -201,9 +238,11 @@ const invokedPath = process.argv[1] === undefined ? undefined : pathToFileURL(re
 if (invokedPath === import.meta.url) {
   const arguments_ = process.argv.slice(2);
   const requirePgoUse = arguments_.includes('--require-pgo-use');
+  const requireFilesystem = arguments_.includes('--require-filesystem');
   const manifestPath = arguments_.find((value) => !value.startsWith('--')) ?? 'dist/manifest.json';
   const result = await verifyV86ArtifactBundle(manifestPath, {
     ...(requirePgoUse ? { requiredPgoMode: 'use' } : {}),
+    requiredFilesystem: requireFilesystem,
   });
   process.stdout.write(`${result.manifestSha256}  manifest.json\n`);
 }

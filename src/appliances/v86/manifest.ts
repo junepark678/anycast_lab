@@ -1,19 +1,60 @@
+import {
+  MemoryV86ArtifactCache,
+  type CachedV86Artifact,
+  type V86ArtifactCache,
+} from './artifact-cache';
+import { StreamingSha256 } from './sha256-stream';
+
 export const PINNED_V86_PACKAGE_VERSION = '0.5.424' as const;
 export const PINNED_V86_COMMIT = '2f1346b0e7d88d4cbbbcc05fe15b4e369c3de23f' as const;
 export const PINNED_BUILDROOT_VERSION = '2026.02.3' as const;
 export const PINNED_BIRD_VERSION = '2.15.1' as const;
 export const PINNED_FRR_VERSION = '10.5.1' as const;
 export const PINNED_LLVM_VERSION = '21.1.8' as const;
-export const V86_IMAGE_BUILD_ID = 'anycastlab-v86-br2026.02.3-r3' as const;
+export const V86_IMAGE_BUILD_ID = 'anycastlab-v86-br2026.02.3-r4' as const;
 
 export type V86ArtifactId = 'v86-wasm' | 'bios' | 'vga-bios' | 'bzimage';
 export type V86PgoMode = 'none' | 'generate' | 'use';
+export type V86FilesystemLayerId = 'complete' | 'base' | 'bird' | 'frr' | 'toolbox';
+export type V86FilesystemLayerRole = 'boot-complete' | 'overlay-base' | 'routing-suite' | 'diagnostics';
+export type V86FilesystemMountType = 'root' | 'overlay-base' | 'overlay-lower';
 
 export interface V86ArtifactManifestEntry {
   readonly id: V86ArtifactId;
   readonly file: string;
   readonly size: number;
   readonly sha256: string;
+}
+
+export interface V86FilesystemLayerEntry {
+  readonly id: V86FilesystemLayerId;
+  readonly role: V86FilesystemLayerRole;
+  readonly requiredAtBoot: boolean;
+  readonly file: string;
+  readonly object: string;
+  readonly size: number;
+  readonly sha256: string;
+  readonly cacheKey: string;
+  readonly dependsOn: readonly V86FilesystemLayerId[];
+  readonly mount: {
+    readonly type: V86FilesystemMountType;
+    readonly path: '/';
+    readonly order: number;
+    readonly readOnly: true;
+  };
+}
+
+export interface V86FilesystemManifest {
+  readonly schemaVersion: 1;
+  readonly layoutVersion: 1;
+  readonly format: 'squashfs';
+  readonly compression: 'zstd';
+  readonly blockSize: 65_536;
+  readonly cache: {
+    readonly namespace: 'anycastlab-v86-filesystem-v1';
+    readonly key: string;
+  };
+  readonly layers: readonly V86FilesystemLayerEntry[];
 }
 
 export interface V86ArtifactManifest {
@@ -49,10 +90,12 @@ export interface V86ArtifactManifest {
     readonly frrProfileSha256: string | null;
   };
   readonly machine: {
+    readonly model: 'shared-namespaces';
     readonly memoryBytes: number;
     readonly vgaMemoryBytes: number;
     readonly trunkMtu: number;
   };
+  readonly filesystem: V86FilesystemManifest;
   readonly artifacts: readonly V86ArtifactManifestEntry[];
 }
 
@@ -60,6 +103,8 @@ export interface VerifiedV86ArtifactBundle {
   readonly manifest: V86ArtifactManifest;
   readonly manifestSha256: string;
   readonly artifacts: Readonly<Record<V86ArtifactId, Uint8Array>>;
+  /** Required boot filesystems remain Blob/File-backed so v86 can page them from OPFS. */
+  readonly filesystems: Readonly<Partial<Record<V86FilesystemLayerId, CachedV86Artifact>>>;
 }
 
 export interface V86ArtifactSource {
@@ -72,6 +117,8 @@ export interface V86ArtifactSource {
 export interface V86ArtifactLoaderOptions {
   readonly fetch?: typeof globalThis.fetch;
   readonly digest?: (contents: Uint8Array) => Promise<string>;
+  /** Content-addressed persistent cache; OPFS is used by the browser runtime. */
+  readonly cache?: V86ArtifactCache;
 }
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
@@ -81,6 +128,36 @@ const REQUIRED_ARTIFACTS: readonly V86ArtifactId[] = [
   'vga-bios',
   'bzimage',
 ];
+
+const FILESYSTEM_LAYER_CONTRACT = [
+  {
+    id: 'complete', role: 'boot-complete', requiredAtBoot: true,
+    file: 'rootfs-complete.squashfs', dependsOn: [], mount: { type: 'root', order: 0 },
+  },
+  {
+    id: 'base', role: 'overlay-base', requiredAtBoot: false,
+    file: 'rootfs-base.squashfs', dependsOn: [], mount: { type: 'overlay-base', order: 0 },
+  },
+  {
+    id: 'bird', role: 'routing-suite', requiredAtBoot: false,
+    file: 'rootfs-bird.squashfs', dependsOn: ['base'], mount: { type: 'overlay-lower', order: 10 },
+  },
+  {
+    id: 'frr', role: 'routing-suite', requiredAtBoot: false,
+    file: 'rootfs-frr.squashfs', dependsOn: ['base'], mount: { type: 'overlay-lower', order: 20 },
+  },
+  {
+    id: 'toolbox', role: 'diagnostics', requiredAtBoot: false,
+    file: 'rootfs-toolbox.squashfs', dependsOn: ['base'], mount: { type: 'overlay-lower', order: 30 },
+  },
+] as const satisfies readonly {
+  readonly id: V86FilesystemLayerId;
+  readonly role: V86FilesystemLayerRole;
+  readonly requiredAtBoot: boolean;
+  readonly file: string;
+  readonly dependsOn: readonly V86FilesystemLayerId[];
+  readonly mount: { readonly type: V86FilesystemMountType; readonly order: number };
+}[];
 
 export async function sha256Hex(contents: Uint8Array): Promise<string> {
   if (globalThis.crypto?.subtle === undefined) {
@@ -118,27 +195,42 @@ export async function loadVerifiedV86Artifacts(
   }
   const manifest = parseV86ArtifactManifest(rawManifest);
   const artifacts = {} as Record<V86ArtifactId, Uint8Array>;
+  const filesystems: Partial<Record<V86FilesystemLayerId, CachedV86Artifact>> = {};
+  const filesystemCache = options.cache ?? new MemoryV86ArtifactCache();
 
   await Promise.all(
     manifest.artifacts.map(async (artifact) => {
       const url = new URL(artifact.file, source.manifestUrl).href;
+      if (options.cache !== undefined) {
+        artifacts[artifact.id] = await loadCachedArtifact(
+          options.cache,
+          fetchImplementation,
+          url,
+          artifact,
+        );
+        return;
+      }
       const bytes = await fetchBytes(fetchImplementation, url);
-      if (bytes.byteLength !== artifact.size) {
-        throw new Error(
-          `v86 artifact ${artifact.id} has size ${bytes.byteLength}; expected ${artifact.size}`,
-        );
-      }
-      const actualHash = await digest(bytes);
-      if (actualHash !== artifact.sha256) {
-        throw new Error(
-          `v86 artifact ${artifact.id} digest mismatch: expected ${artifact.sha256}, received ${actualHash}`,
-        );
-      }
+      await verifyArtifactBytes(artifact, bytes, digest);
       artifacts[artifact.id] = bytes;
     }),
   );
 
-  return { manifest, manifestSha256: source.manifestSha256, artifacts };
+  await Promise.all(
+    manifest.filesystem.layers
+      .filter((layer) => layer.requiredAtBoot)
+      .map(async (layer) => {
+        const url = filesystemLayerUrl(source.manifestUrl, layer);
+        filesystems[layer.id] = await loadCachedBlob(
+          filesystemCache,
+          fetchImplementation,
+          url,
+          layer,
+        );
+      }),
+  );
+
+  return { manifest, manifestSha256: source.manifestSha256, artifacts, filesystems };
 }
 
 export function parseV86ArtifactManifest(value: unknown): V86ArtifactManifest {
@@ -194,6 +286,9 @@ export function parseV86ArtifactManifest(value: unknown): V86ArtifactManifest {
   }
 
   const machine = requireRecord(value.machine, 'machine');
+  if (machine.model !== 'shared-namespaces') {
+    throw new Error('Unsupported v86 machine model; this runtime requires shared namespaces');
+  }
   if (
     !isPositiveInteger(machine.memoryBytes) ||
     !isPowerOfTwo(machine.memoryBytes) ||
@@ -206,13 +301,15 @@ export function parseV86ArtifactManifest(value: unknown): V86ArtifactManifest {
     throw new Error('Invalid v86 machine sizing');
   }
 
+  const filesystem = parseV86FilesystemManifest(value.filesystem);
+
   if (!Array.isArray(value.artifacts)) throw new Error('v86 manifest artifacts must be an array');
   const seen = new Set<string>();
   const artifacts = value.artifacts.map((raw): V86ArtifactManifestEntry => {
     if (!isRecord(raw) || !isArtifactId(raw.id)) throw new Error('Invalid v86 artifact id');
     if (seen.has(raw.id)) throw new Error(`Duplicate v86 artifact: ${raw.id}`);
     seen.add(raw.id);
-    if (typeof raw.file !== 'string' || raw.file.length === 0 || /^[a-z]+:/i.test(raw.file)) {
+    if (typeof raw.file !== 'string' || !isSafeRelativeArtifactPath(raw.file)) {
       throw new Error(`Invalid file for v86 artifact ${raw.id}`);
     }
     if (!isPositiveInteger(raw.size)) throw new Error(`Invalid size for v86 artifact ${raw.id}`);
@@ -250,18 +347,198 @@ export function parseV86ArtifactManifest(value: unknown): V86ArtifactManifest {
       frrProfileSha256: pgo.frrProfileSha256 as string | null,
     },
     machine: {
+      model: 'shared-namespaces',
       memoryBytes: machine.memoryBytes,
       vgaMemoryBytes: machine.vgaMemoryBytes,
       trunkMtu: machine.trunkMtu,
     },
+    filesystem,
     artifacts,
   };
+}
+
+export function parseV86FilesystemManifest(value: unknown): V86FilesystemManifest {
+  const filesystem = requireRecord(value, 'filesystem');
+  if (
+    filesystem.schemaVersion !== 1 ||
+    filesystem.layoutVersion !== 1 ||
+    filesystem.format !== 'squashfs' ||
+    filesystem.compression !== 'zstd' ||
+    filesystem.blockSize !== 65_536
+  ) {
+    throw new Error('Unsupported v86 filesystem layout');
+  }
+  if (!Array.isArray(filesystem.layers) || filesystem.layers.length !== FILESYSTEM_LAYER_CONTRACT.length) {
+    throw new Error(`v86 filesystem must contain ${FILESYSTEM_LAYER_CONTRACT.length} pinned layers`);
+  }
+  const layers = filesystem.layers.map((raw, index): V86FilesystemLayerEntry => {
+    const contract = FILESYSTEM_LAYER_CONTRACT[index]!;
+    const layer = requireRecord(raw, `filesystem.layers.${index}`);
+    if (
+      layer.id !== contract.id ||
+      layer.role !== contract.role ||
+      layer.requiredAtBoot !== contract.requiredAtBoot ||
+      layer.file !== contract.file
+    ) {
+      throw new Error(`v86 filesystem layer ${index} does not match the ${contract.id} contract`);
+    }
+    if (!isPositiveInteger(layer.size)) throw new Error(`Invalid size for filesystem layer ${contract.id}`);
+    if (typeof layer.sha256 !== 'string') throw new Error(`Invalid digest for filesystem layer ${contract.id}`);
+    assertSha256(`filesystem.layers.${contract.id}.sha256`, layer.sha256);
+    const expectedObject = `blobs/sha256/${layer.sha256}.squashfs`;
+    if (layer.object !== expectedObject || layer.cacheKey !== `sha256:${layer.sha256}`) {
+      throw new Error(`Invalid content address for filesystem layer ${contract.id}`);
+    }
+    if (
+      !Array.isArray(layer.dependsOn) ||
+      layer.dependsOn.length !== contract.dependsOn.length ||
+      layer.dependsOn.some((dependency, dependencyIndex) => dependency !== contract.dependsOn[dependencyIndex])
+    ) {
+      throw new Error(`Invalid dependencies for filesystem layer ${contract.id}`);
+    }
+    const mount = requireRecord(layer.mount, `filesystem.layers.${contract.id}.mount`);
+    if (
+      mount.type !== contract.mount.type ||
+      mount.path !== '/' ||
+      mount.order !== contract.mount.order ||
+      mount.readOnly !== true
+    ) {
+      throw new Error(`Invalid mount contract for filesystem layer ${contract.id}`);
+    }
+    return {
+      id: contract.id,
+      role: contract.role,
+      requiredAtBoot: contract.requiredAtBoot,
+      file: contract.file,
+      object: expectedObject,
+      size: layer.size,
+      sha256: layer.sha256,
+      cacheKey: `sha256:${layer.sha256}`,
+      dependsOn: [...contract.dependsOn],
+      mount: {
+        type: contract.mount.type,
+        path: '/',
+        order: contract.mount.order,
+        readOnly: true,
+      },
+    };
+  });
+  const cache = requireRecord(filesystem.cache, 'filesystem.cache');
+  if (cache.namespace !== 'anycastlab-v86-filesystem-v1') {
+    throw new Error('Unsupported v86 filesystem cache namespace');
+  }
+  const expectedCacheKey = v86FilesystemCacheKey(layers);
+  if (cache.key !== expectedCacheKey) throw new Error('Invalid v86 filesystem cache identity');
+  return {
+    schemaVersion: 1,
+    layoutVersion: 1,
+    format: 'squashfs',
+    compression: 'zstd',
+    blockSize: 65_536,
+    cache: { namespace: 'anycastlab-v86-filesystem-v1', key: expectedCacheKey },
+    layers,
+  };
+}
+
+export function v86FilesystemCacheKey(layers: readonly V86FilesystemLayerEntry[]): string {
+  const projection = {
+    schemaVersion: 1,
+    layoutVersion: 1,
+    format: 'squashfs',
+    compression: 'zstd',
+    blockSize: 65_536,
+    layers: layers.map((layer) => ({
+      id: layer.id,
+      role: layer.role,
+      requiredAtBoot: layer.requiredAtBoot,
+      file: layer.file,
+      object: layer.object,
+      size: layer.size,
+      sha256: layer.sha256,
+      dependsOn: [...layer.dependsOn],
+      mount: { ...layer.mount },
+    })),
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(projection));
+  return `sha256:${new StreamingSha256().update(bytes).digestHex()}`;
+}
+
+export function filesystemLayerUrl(
+  manifestUrl: string,
+  layer: V86FilesystemLayerEntry,
+): string {
+  const url = new URL(manifestUrl);
+  if (/\/objects\/sha256\/[a-f0-9]{64}\/manifest\.json$/.test(url.pathname)) {
+    return new URL(`../../../${layer.object}`, url).href;
+  }
+  return new URL(layer.file, url).href;
 }
 
 async function fetchBytes(fetchImplementation: typeof globalThis.fetch, url: string): Promise<Uint8Array> {
   const response = await fetchImplementation(url);
   if (!response.ok) throw new Error(`Failed to fetch ${url}: HTTP ${response.status}`);
   return new Uint8Array(await response.arrayBuffer());
+}
+
+async function loadCachedArtifact(
+  cache: V86ArtifactCache,
+  fetchImplementation: typeof globalThis.fetch,
+  url: string,
+  artifact: V86ArtifactManifestEntry,
+): Promise<Uint8Array> {
+  const bytes = await readBlob((await loadCachedBlob(cache, fetchImplementation, url, artifact)).blob);
+  if (bytes.byteLength !== artifact.size) {
+    throw new Error(`Cached v86 artifact ${artifact.id} has an invalid size`);
+  }
+  return bytes;
+}
+
+async function loadCachedBlob(
+  cache: V86ArtifactCache,
+  fetchImplementation: typeof globalThis.fetch,
+  url: string,
+  artifact: { readonly size: number; readonly sha256: string },
+): Promise<CachedV86Artifact> {
+  const identity = { size: artifact.size, sha256: artifact.sha256 };
+  const cached = await cache.get(identity);
+  if (cached !== null) return cached;
+
+  const response = await fetchImplementation(url);
+  if (!response.ok) throw new Error(`Failed to fetch ${url}: HTTP ${response.status}`);
+  if (response.body === null) {
+    throw new Error(`Failed to cache ${url}: response body is not streamable`);
+  }
+  return cache.store(identity, response.body);
+}
+
+async function verifyArtifactBytes(
+  artifact: V86ArtifactManifestEntry,
+  bytes: Uint8Array,
+  digest: (contents: Uint8Array) => Promise<string>,
+): Promise<void> {
+  if (bytes.byteLength !== artifact.size) {
+    throw new Error(
+      `v86 artifact ${artifact.id} has size ${bytes.byteLength}; expected ${artifact.size}`,
+    );
+  }
+  const actualHash = await digest(bytes);
+  if (actualHash !== artifact.sha256) {
+    throw new Error(
+      `v86 artifact ${artifact.id} digest mismatch: expected ${artifact.sha256}, received ${actualHash}`,
+    );
+  }
+}
+
+function readBlob(blob: Blob): Promise<Uint8Array> {
+  if (typeof blob.arrayBuffer === 'function') {
+    return blob.arrayBuffer().then((buffer) => new Uint8Array(buffer));
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error('Artifact Blob read failed'));
+    reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer));
+    reader.readAsArrayBuffer(blob);
+  });
 }
 
 function assertSha256(name: string, value: string): void {
@@ -282,9 +559,26 @@ function isPositiveInteger(value: unknown): value is number {
 }
 
 function isPowerOfTwo(value: number): boolean {
-  return (value & (value - 1)) === 0;
+  return Number.isInteger(Math.log2(value));
 }
 
 function isArtifactId(value: unknown): value is V86ArtifactId {
   return typeof value === 'string' && (REQUIRED_ARTIFACTS as readonly string[]).includes(value);
+}
+
+function isSafeRelativeArtifactPath(value: string): boolean {
+  if (
+    value.length === 0 ||
+    value.startsWith('/') ||
+    value.includes('\\') ||
+    value.includes('?') ||
+    value.includes('#') ||
+    value.includes('%')
+  ) {
+    return false;
+  }
+  const segments = value.split('/');
+  return segments.every((segment) => (
+    segment.length > 0 && segment !== '.' && segment !== '..' && /^[A-Za-z0-9._-]+$/.test(segment)
+  ));
 }

@@ -1,3 +1,7 @@
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   APPLIANCE_HOST_ABI_VERSION,
@@ -7,6 +11,10 @@ import {
   type ApplianceRuntimeDescriptor,
 } from '../appliances/abi';
 import { ApplianceRuntimeRegistry } from '../appliances/registry';
+import {
+  SHARED_GUEST_CAPACITY_GUIDANCE,
+  SHARED_GUEST_LIMITS,
+} from '../appliances/v86/shared-guest-contract';
 import { createEmptyProject, type LabNode, type LabProject } from '../core/types';
 import {
   BIRD_NATIVE_EXECUTABLE,
@@ -89,11 +97,31 @@ describe('native appliance boot mapping', () => {
     expect(fileText(boot.files, FRR_NATIVE_WRAPPER)).toBe(FRR_WRAPPER_SOURCE);
     expect(FRR_WRAPPER_SOURCE).toContain('/usr/libexec/anycastlab-frr start');
     expect(FRR_WRAPPER_SOURCE).toContain('/usr/libexec/anycastlab-frr stop');
-    expect(FRR_WRAPPER_SOURCE).toContain('while [ "$attempt" -lt 480 ]');
+    expect(FRR_WRAPPER_SOURCE).toContain('[ "$start_elapsed" -lt 75 ]');
+    expect(FRR_WRAPPER_SOURCE).toContain('readiness_attempts=$((90 - start_elapsed))');
+    expect(FRR_WRAPPER_SOURCE).toContain('sleep 1');
     expect(FRR_WRAPPER_SOURCE).toContain("trap 'exit 0' INT TERM");
-    expect(FRR_WRAPPER_SOURCE).toContain('/usr/sbin/frrinit.sh status');
+    expect(FRR_WRAPPER_SOURCE).toContain('/run/frr/watchfrr.pid');
+    expect(FRR_WRAPPER_SOURCE).toContain('kill -0 "$watchfrr_pid"');
+    expect(FRR_WRAPPER_SOURCE).not.toContain("exec /usr/bin/vtysh -c 'show version'");
+    expect(FRR_WRAPPER_SOURCE).not.toContain('exec /usr/sbin/frrinit.sh status');
+    expect(FRR_WRAPPER_SOURCE).toContain('rm -f /run/anycastlab/frr.ready "$failure_file" "$status_file"');
+    expect(FRR_WRAPPER_SOURCE).toContain('mkfifo -m 0600 "$START_OUTPUT_PIPE"');
+    expect(FRR_WRAPPER_SOURCE).toContain('{ head -c 4096; cat >/dev/null; }');
+    expect(FRR_WRAPPER_SOURCE).not.toContain('ulimit -f');
+    expect(FRR_WRAPPER_SOURCE).toContain('rm -f "$START_OUTPUT_PIPE"');
+    expect(FRR_WRAPPER_SOURCE).toContain('setsid /bin/sh -c');
+    expect(FRR_WRAPPER_SOURCE).toContain('FRR start timed out; failed:');
+    expect(FRR_WRAPPER_SOURCE).toContain('signal_job TERM "$pid"');
+    expect(FRR_WRAPPER_SOURCE).toContain('signal_job KILL "$pid"');
+    expect(FRR_WRAPPER_SOURCE).toContain("head -c 128");
+    expect(FRR_WRAPPER_SOURCE).toContain('FRR readiness timed out; failed: ${failed:-unknown');
+    expect(FRR_WRAPPER_SOURCE).toContain('FRR health check failed; failed:');
+    expect(FRR_WRAPPER_SOURCE).toContain('failures=3');
+    expect(FRR_WRAPPER_SOURCE).toContain('rm -f "$failure_file"');
+    expect(FRR_WRAPPER_SOURCE).not.toContain('record_failure "FRR health check failed; failed: \\${failed:-unknown (status $last_status)}"\n      exit 1');
     expect(FRR_WRAPPER_SOURCE).toContain('touch /run/anycastlab/frr.ready');
-    expect(FRR_WRAPPER_SOURCE).toContain('[ "$failures" -lt 3 ] || exit 1');
+    expect(FRR_WRAPPER_SOURCE).toContain('[ "$failures" -lt 3 ] || {');
     expect(FRR_WRAPPER_SOURCE).toContain('while sleep 2');
     expect(boot.files.find((file) => file.path === FRR_NATIVE_WRAPPER)?.mode).toBe(0o755);
   });
@@ -106,6 +134,126 @@ describe('native appliance boot mapping', () => {
 
     expect(boot.files.filter((file) => file.path === FRR_DAEMONS_FILE)).toHaveLength(1);
     expect(fileText(boot.files, FRR_DAEMONS_FILE)).toBe('zebra=yes\nbgpd=yes\n');
+  });
+
+  it('keeps the generated FRR wrapper shell-valid and extracts a bounded failed-daemon list', () => {
+    const directory = mkdtempSync(resolve(tmpdir(), 'anycast-frr-wrapper-'));
+    try {
+      const wrapper = resolve(directory, 'wrapper.sh');
+      const status = resolve(directory, 'status.txt');
+      writeFileSync(wrapper, FRR_WRAPPER_SOURCE);
+      writeFileSync(status, [
+        'Status of watchfrr: FAILED',
+        'Status of zebra: running',
+        'Status of bgpd: FAILED',
+        'Status of ospf6d: FAILED',
+        '',
+      ].join('\n'));
+      execFileSync('sh', ['-n', wrapper]);
+
+      const functionBody = FRR_WRAPPER_SOURCE.match(/failed_daemons\(\) \{\n([\s\S]*?)\n\}/)?.[1];
+      expect(functionBody).toBeDefined();
+      const extracted = execFileSync('sh', [
+        '-c',
+        `status_file=$1\nfailed_daemons() {\n${functionBody}\n}\nfailed_daemons "$status_file"`,
+        'sh',
+        status,
+      ], { encoding: 'utf8' });
+
+      expect(extracted).toBe('watchfrr,bgpd,ospf6d');
+      expect(new TextEncoder().encode(extracted).byteLength).toBeLessThanOrEqual(128);
+
+      writeFileSync(status, 'watchfrr cannot connect\n  control socket is absent\r\n');
+      const fallback = execFileSync('sh', [
+        '-c',
+        `status_file=$1\nfailed_daemons() {\n${functionBody}\n}\nfailed_daemons "$status_file"`,
+        'sh',
+        status,
+      ], { encoding: 'utf8' });
+      expect(fallback).toBe('watchfrr cannot connect control socket is absent');
+      expect(new TextEncoder().encode(fallback).byteLength).toBeLessThanOrEqual(128);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('times out, kills, and reaps a blocked FRR start before bounded cleanup', () => {
+    const directory = mkdtempSync(resolve(tmpdir(), 'anycast-frr-start-timeout-'));
+    try {
+      const helper = resolve(directory, 'frr-helper.sh');
+      const statusHelper = resolve(directory, 'frr-status.sh');
+      const wrapper = resolve(directory, 'wrapper.sh');
+      const failure = resolve(directory, 'entrypoint.failure');
+      const ready = resolve(directory, 'frr.ready');
+      const status = resolve(directory, 'frr-status.out');
+      const startOutput = resolve(directory, 'frr-start.out');
+      const startPipe = resolve(directory, 'frr-start.pipe');
+      const startDone = resolve(directory, 'frr-start.done');
+      const startSession = resolve(directory, 'frr-start.session');
+      const startPid = resolve(directory, 'start.pid');
+      const stopped = resolve(directory, 'stopped');
+      writeFileSync(helper, `#!/bin/sh
+case "$1" in
+  start) printf '%s\\n' "$$" > ${shellPath(startPid)}; trap '' TERM; while :; do sleep 30; done ;;
+  stop) : > ${shellPath(stopped)} ;;
+esac
+`, { mode: 0o755 });
+      writeFileSync(statusHelper, '#!/bin/sh\necho "Status of watchfrr: FAILED" >&2\nexit 1\n', { mode: 0o755 });
+
+      const runtimeStart = FRR_WRAPPER_SOURCE.indexOf('failure_file=');
+      expect(runtimeStart).toBeGreaterThan(0);
+      const source = `#!/bin/sh\nset -eu\n${FRR_WRAPPER_SOURCE.slice(runtimeStart)}`
+        .replaceAll('/run/anycastlab/entrypoint.failure', failure)
+        .replaceAll('/run/anycastlab/frr.ready', ready)
+        .replaceAll('/run/anycastlab/frr-status.out', status)
+        .replaceAll('/run/anycastlab/frr-start.out', startOutput)
+        .replaceAll('/run/anycastlab/frr-start.pipe', startPipe)
+        .replaceAll('/run/anycastlab/frr-start.done', startDone)
+        .replaceAll('/run/anycastlab/frr-start.pid', startSession)
+        .replaceAll('/usr/libexec/anycastlab-frr', helper)
+        .replaceAll('/usr/sbin/frrinit.sh', statusHelper)
+        .replaceAll('[ "$start_elapsed" -lt 75 ]', '[ "$start_elapsed" -lt 1 ]')
+        .replaceAll('[ "$start_elapsed" -ge 75 ]', '[ "$start_elapsed" -ge 1 ]')
+        .replaceAll('[ "$attempt" -lt 5 ]', '[ "$attempt" -lt 1 ]')
+        .replaceAll('sleep 1', 'sleep 0.05');
+      writeFileSync(wrapper, source, { mode: 0o755 });
+
+      const result = spawnSync('sh', [wrapper], { encoding: 'utf8', timeout: 5_000 });
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(1);
+      expect(readFileSync(failure, 'utf8')).toBe('FRR start timed out; failed: unknown\n');
+      expect(readFileSync(stopped, 'utf8')).toBe('');
+      const pid = Number.parseInt(readFileSync(startPid, 'utf8'), 10);
+      expect(processExists(pid)).toBe(false);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('uses the live watchfrr supervisor as the FRR readiness boundary', () => {
+    const directory = mkdtempSync(resolve(tmpdir(), 'anycast-frr-readiness-'));
+    try {
+      const pidFile = resolve(directory, 'watchfrr.pid');
+      const statusFile = resolve(directory, 'status.out');
+      writeFileSync(pidFile, `${process.pid}\n`);
+      const match = FRR_WRAPPER_SOURCE.match(/probe_status\(\) \{\n([\s\S]*?)\n\}/);
+      expect(match).not.toBeNull();
+      const body = match![1]!
+        .replaceAll('/run/frr/watchfrr.pid', pidFile);
+      const script = `status_file=$1\nlast_status=0\nprobe_status() {\n${body}\n}\nprobe_status`;
+
+      const ready = spawnSync('sh', ['-c', script, 'sh', statusFile], { encoding: 'utf8' });
+      expect(ready.status).toBe(0);
+      expect(() => readFileSync(statusFile, 'utf8')).toThrow();
+
+      writeFileSync(pidFile, '999999999\n');
+      const dead = spawnSync('sh', ['-c', script, 'sh', statusFile], { encoding: 'utf8' });
+      expect(dead.status).toBe(1);
+      expect(readFileSync(statusFile, 'utf8')).toBe('watchfrr process 999999999 is not running\n');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it('rejects an FRR entrypoint the upstream integrated-config service would ignore', () => {
@@ -220,6 +368,83 @@ describe('native project eligibility', () => {
       expect.arrayContaining(['native.mac-duplicate', 'native.mac-invalid']),
     );
   });
+
+  it('rejects aggregate and per-node structures the shared guest cannot represent', () => {
+    const tooManyNodes = projectWith(
+      ...Array.from({ length: SHARED_GUEST_LIMITS.nodes + 1 }, (_, index) => clientNode(`client-${index}`)),
+    );
+    const tooManyInterfaces = clientNode('wide-client');
+    tooManyInterfaces.interfaces = Array.from(
+      { length: SHARED_GUEST_LIMITS.interfacesPerNode + 1 },
+      (_, index) => ({ id: `if-${index}`, name: `eth${index}`, addresses: [], state: 'up' as const }),
+    );
+    const tooManyAddresses = clientNode('address-heavy');
+    tooManyAddresses.interfaces[0]!.addresses = Array.from(
+      { length: SHARED_GUEST_LIMITS.addressesPerNode + 1 },
+      (_, index) => `${index < 256 ? `10.0.0.${index}` : `10.0.1.${index - 256}`}/24`,
+    );
+
+    expect(analyzeNativeProject(tooManyNodes).diagnostics).toContainEqual(expect.objectContaining({
+      severity: 'error', code: 'native.guest-node-count', path: 'nodes',
+    }));
+    expect(analyzeNativeProject(projectWith(tooManyInterfaces)).diagnostics).toContainEqual(
+      expect.objectContaining({ severity: 'error', code: 'native.guest-interface-count', nodeId: 'wide-client' }),
+    );
+    expect(analyzeNativeProject(projectWith(tooManyAddresses)).diagnostics).toContainEqual(
+      expect.objectContaining({ severity: 'error', code: 'native.guest-address-count', nodeId: 'address-heavy' }),
+    );
+  });
+
+  it('surfaces UTF-8 and nested-root-archive limits during project analysis', () => {
+    const longId = clientNode('λ'.repeat(129));
+    const archiveFull = clientNode('archive-full');
+    archiveFull.files.push({
+      path: '/etc/full',
+      content: 'x'.repeat(SHARED_GUEST_LIMITS.fileBytes),
+    });
+
+    expect(analyzeNativeProject(projectWith(longId)).diagnostics).toContainEqual(expect.objectContaining({
+      severity: 'error', code: 'native.guest-node-id-bytes', nodeId: longId.id,
+    }));
+    expect(analyzeNativeProject(projectWith(archiveFull)).diagnostics).toContainEqual(expect.objectContaining({
+      severity: 'error', code: 'native.guest-archive-bytes', nodeId: 'archive-full',
+    }));
+  });
+
+  it('warns rather than rejecting topologies likely to pressure the fixed shared VM', () => {
+    const topology = projectWith(
+      ...Array.from(
+        { length: SHARED_GUEST_CAPACITY_GUIDANCE.recommendedNodes + 1 },
+        (_, index) => clientNode(`client-${index}`),
+      ),
+    );
+
+    const result = analyzeNativeProject(topology);
+
+    expect(result.eligible).toBe(true);
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      severity: 'warning', code: 'native.guest-memory-pressure', path: 'nodes',
+    }));
+  });
+
+  it('rejects an aggregate bootstrap the guest extractor cannot represent', () => {
+    const payload = 'x'.repeat(6 * 1024 * 1024);
+    const nodes = Array.from({ length: 3 }, (_, index) => {
+      const node = clientNode(`large-${index}`);
+      node.files.push({ path: '/etc/payload', content: payload });
+      return node;
+    });
+
+    const result = analyzeNativeProject(projectWith(...nodes));
+
+    expect(result.eligible).toBe(false);
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      severity: 'error', code: 'native.guest-bootstrap-bytes', path: 'nodes',
+    }));
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      severity: 'error', code: 'native.guest-bootstrap-payload-bytes', path: 'nodes',
+    }));
+  });
 });
 
 function projectWith(...nodes: LabNode[]): LabProject {
@@ -314,4 +539,17 @@ function descriptorRegistry(descriptors: readonly ApplianceRuntimeDescriptor[]):
 function fileText(files: readonly { path: string; contents: Uint8Array }[], path: string): string | undefined {
   const value = files.find((file) => file.path === path);
   return value === undefined ? undefined : decoder.decode(value.contents);
+}
+
+function shellPath(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }

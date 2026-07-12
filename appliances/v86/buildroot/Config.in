@@ -1,2 +1,3 @@
 # The host-only anycast-clang-toolchain package is an explicit build dependency
 # from external.mk and intentionally has no user-selectable target option.
+source "$BR2_EXTERNAL_ANYCAST_LAB_PATH/package/anycast-labd/Config.in"

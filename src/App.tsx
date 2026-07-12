@@ -1,7 +1,11 @@
 import { useEdgesState, useNodesState, type Connection } from '@xyflow/react';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import { ApplianceRuntimeRegistry } from './appliances';
-import { createV86RuntimeFactories, loadVerifiedV86Artifacts } from './appliances/v86';
+import {
+  createSharedV86RuntimeFactories,
+  loadVerifiedV86Artifacts,
+  openBrowserV86ArtifactCache,
+} from './appliances/v86';
 import { LabEngine, parseNativeConfig, validateProject } from './core';
 import type { EngineSnapshot, LabProject, PacketTrace } from './core';
 import { NativeLabEngine, type NativeLabEvent, type NativeTerminalSession } from './native';
@@ -137,7 +141,7 @@ export default function App() {
     () => store.project.nodes.some((node) => node.kind !== 'switch' && node.appliance.runtime === 'wasm') ? 'native' : 'simulation',
     [store.project.nodes],
   );
-  const nativeVmCount = useMemo(
+  const nativeNodeCount = useMemo(
     () => store.project.nodes.filter((node) => node.kind !== 'switch').length,
     [store.project.nodes],
   );
@@ -243,12 +247,23 @@ export default function App() {
       manifestSha256: nativeAvailability.manifestSha256,
     };
     let artifactPromise: ReturnType<typeof loadVerifiedV86Artifacts> | null = null;
-    const factories = createV86RuntimeFactories({
+    const cachePromise = openBrowserV86ArtifactCache();
+    const factories = createSharedV86RuntimeFactories({
       artifactSource,
       bootTimeoutMs: 120_000,
-      loadArtifacts: () => {
-        artifactPromise ??= loadVerifiedV86Artifacts(artifactSource);
-        return artifactPromise;
+      loadArtifacts: async () => {
+        const cache = await cachePromise;
+        const attempt = artifactPromise ?? loadVerifiedV86Artifacts(
+          artifactSource,
+          cache === null ? {} : { cache },
+        );
+        artifactPromise = attempt;
+        try {
+          return await attempt;
+        } catch (error) {
+          if (artifactPromise === attempt) artifactPromise = null;
+          throw error;
+        }
       },
     });
     for (const factory of factories) registry.register(factory);
@@ -351,7 +366,7 @@ export default function App() {
       if (store.running) {
         if (runtimeMode === 'native') {
           await nativeEngineRef.current?.pause();
-          appendRuntimeMessage('system', 'Native VMs paused. Their machine state is preserved in memory.');
+          appendRuntimeMessage('system', 'The shared native VM is paused. All namespace state remains in memory.');
         }
         store.setRunning(false);
         return;
@@ -365,13 +380,13 @@ export default function App() {
         store.setRunning(true);
         store.setSnapshot(null);
         store.setTrace(null);
-        const estimate = nativeMemoryEstimate(nativeVmCount, nativeAvailability.memoryBytes);
+        const estimate = nativeMemoryEstimate(nativeNodeCount, nativeAvailability.memoryBytes);
         const existing = nativeEngineRef.current;
         if (existing?.state === 'paused') {
-          appendRuntimeMessage('system', 'Resuming native Linux VMs…');
+          appendRuntimeMessage('system', 'Resuming the shared native Linux VM…');
           await existing.resume();
         } else {
-          appendRuntimeMessage('system', `Booting ${nativeVmCount} isolated Linux VMs (${estimate}) and executing each appliance project independently…`);
+          appendRuntimeMessage('system', `Booting one native Linux VM with ${nativeNodeCount} isolated node namespaces (${estimate})…`);
           const nativeEngine = await rebuildNativeEngine();
           await nativeEngine.start();
         }
@@ -395,7 +410,7 @@ export default function App() {
     } finally {
       finishRuntimeOperation();
     }
-  }, [beginRuntimeOperation, finishRuntimeOperation, nativeAvailability, nativeVmCount, rebuildEngine, rebuildNativeEngine, runtimeMode, store]);
+  }, [beginRuntimeOperation, finishRuntimeOperation, nativeAvailability, nativeNodeCount, rebuildEngine, rebuildNativeEngine, runtimeMode, store]);
 
   const selectedNode = store.selection?.kind === 'node' ? store.project.nodes.find((node) => node.id === store.selection?.id) : undefined;
   const selectedLink = store.selection?.kind === 'link' ? store.project.links.find((link) => link.id === store.selection?.id) : undefined;
@@ -446,7 +461,7 @@ export default function App() {
 
   const sendNativeCommand = useCallback(async (nodeId: string, command: string): Promise<void> => {
     const engine = nativeEngineRef.current;
-    if (engine?.state !== 'running') throw new Error('Start the native VM lab before opening a serial shell.');
+    if (engine?.state !== 'running') throw new Error('Start the native VM lab before opening a node terminal.');
     let sessionPromise = nativeTerminalSessionsRef.current.get(nodeId);
     if (sessionPromise === undefined) {
       sessionPromise = engine.openTerminal(nodeId).catch((error) => {
@@ -587,15 +602,15 @@ export default function App() {
       store.resetRuntime();
       store.setRuntimeMode(mode);
       appendRuntimeMessage('system', mode === 'native'
-        ? 'Native VM mode selected. Run boots real BIRD, FRR, client, and service appliances; there is no compatibility fallback.'
+        ? 'Native VM mode selected. One shared Linux VM runs real BIRD, FRR, client, and service nodes in isolated namespaces; there is no compatibility fallback.'
         : 'Simulation mode selected. This deterministic compatibility engine is fast, but does not execute the upstream daemons.');
       if (mode === 'native' && nativeAvailability?.available) {
-        setToast(`Native mode selected · ${nativeMemoryEstimate(nativeVmCount, nativeAvailability.memoryBytes)}. Run when ready.`);
+        setToast(`Native mode selected · ${nativeMemoryEstimate(nativeNodeCount, nativeAvailability.memoryBytes)}. Run when ready.`);
       }
     } finally {
       finishRuntimeOperation();
     }
-  }, [beginRuntimeOperation, disposeRuntime, finishRuntimeOperation, nativeAvailability, nativeVmCount, runtimeMode, store]);
+  }, [beginRuntimeOperation, disposeRuntime, finishRuntimeOperation, nativeAvailability, nativeNodeCount, runtimeMode, store]);
 
   const exportCapture = useCallback(() => {
     const engine = nativeEngineRef.current;
@@ -664,7 +679,7 @@ export default function App() {
   const nativeRuntimeDetail = nativeAvailability === null
     ? 'Checking for the verified native VM image…'
     : nativeAvailability.available
-      ? `${nativeAvailability.buildId} · ${nativeMemoryEstimate(nativeVmCount, nativeAvailability.memoryBytes)}`
+      ? `${nativeAvailability.buildId} · ${nativeMemoryEstimate(nativeNodeCount, nativeAvailability.memoryBytes)}`
       : nativeAvailability.reason;
   const projectMutationLocked = nativeProjectLocked || runtimeBusy;
 
@@ -781,7 +796,7 @@ export default function App() {
       </main>
       <BottomPanel
         terminalTitle={consoleNode
-          ? `${consoleNode.name} · ${runtimeMode === 'native' ? 'isolated serial shell' : consoleNode.appliance.kind === 'frr' ? 'isolated vtysh-compatible console' : consoleNode.appliance.kind === 'bird' ? 'isolated birdc-compatible console' : 'isolated shell'}`
+          ? `${consoleNode.name} · ${runtimeMode === 'native' ? 'isolated namespace shell' : consoleNode.appliance.kind === 'frr' ? 'isolated vtysh-compatible console' : consoleNode.appliance.kind === 'bird' ? 'isolated birdc-compatible console' : 'isolated shell'}`
           : 'No appliance console'}
         terminalLines={consoleNode ? store.terminalLinesByNode[consoleNode.id] ?? [] : []}
         consoleTargets={consoleNodes.map((node) => ({ id: node.id, label: node.name }))}

@@ -61,7 +61,7 @@ export function NodeInspector({ node, interfaces, defaultGateway, serviceAddress
           <div className="runtime-card">
             <strong>{node.data.runtimeLabel}</strong>
             <span className={`runtime-badge runtime-badge--${node.data.runtime}`}>
-              {node.data.runtime === 'native-wasm' ? 'Native daemon · isolated VM' : node.data.runtime === 'compatibility' ? 'Compatibility engine' : 'Built in'}
+              {node.data.runtime === 'native-wasm' ? 'Native daemon · isolated namespace' : node.data.runtime === 'compatibility' ? 'Compatibility engine' : 'Built in'}
             </span>
           </div>
         </div>
@@ -88,8 +88,8 @@ export function NodeInspector({ node, interfaces, defaultGateway, serviceAddress
         {node.data.runtime === 'compatibility' && (
           <div className="notice notice--warning"><AlertTriangle size={15} /><span>This router uses the fast compatibility engine. Its files use native syntax, but a compiled daemon is not executing in this mode.</span></div>
         )}
-        {locked && <div className="notice notice--warning"><AlertTriangle size={15} /><span>The native VM owns this project state. Reset the runtime before editing topology, interfaces, or files.</span></div>}
-        {node.data.kind === 'service' && node.data.runtime === 'native-wasm' && <div className="notice"><AlertTriangle size={15} /><span>Native service nodes configure addresses and kernel ICMP. Start DNS, HTTP, TCP, or UDP servers yourself from the serial shell.</span></div>}
+        {locked && <div className="notice notice--warning"><AlertTriangle size={15} /><span>The shared native runtime owns this project state. Reset it before editing topology, interfaces, or files.</span></div>}
+        {node.data.kind === 'service' && node.data.runtime === 'native-wasm' && <div className="notice"><AlertTriangle size={15} /><span>Native service nodes configure addresses and kernel ICMP. Start DNS, HTTP, TCP, or UDP servers yourself from the node terminal.</span></div>}
       </div>
       <div className="inspector__footer">
         <button type="button" className="button button--danger" disabled={locked} onClick={onDelete}><Trash2 size={15} /> Delete</button>

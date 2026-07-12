@@ -198,7 +198,8 @@ jobs:
           EXPECTED_PGO_CONTEXT: ${{ steps.pgo_context.outputs.digest }}
         run: |
           set -euo pipefail
-          manifest_line=$(node appliances/v86/scripts/verify-manifest.mjs appliances/v86/dist/manifest.json)
+          manifest_line=$(node appliances/v86/scripts/verify-manifest.mjs \
+            --require-filesystem appliances/v86/dist/manifest.json)
           if [[ "$manifest_line" != "$(cat appliances/v86/dist/manifest.sha256)" ]]; then
             echo 'Instrumented manifest.sha256 does not match the verified appliance bundle' >&2
             exit 1
@@ -294,7 +295,7 @@ jobs:
         run: |
           set -euo pipefail
           manifest_line=$(node appliances/v86/scripts/verify-manifest.mjs \
-            --require-pgo-use appliances/v86/dist/manifest.json)
+            --require-pgo-use --require-filesystem appliances/v86/dist/manifest.json)
           if [[ "$manifest_line" != "$(cat appliances/v86/dist/manifest.sha256)" ]]; then
             echo 'Optimized manifest.sha256 does not match the verified appliance bundle' >&2
             exit 1
@@ -407,7 +408,7 @@ jobs:
         run: |
           set -euo pipefail
           manifest_line=$(node appliances/v86/scripts/verify-manifest.mjs \
-            --require-pgo-use appliances/v86/dist/manifest.json)
+            --require-pgo-use --require-filesystem appliances/v86/dist/manifest.json)
           if [[ "$manifest_line" != "$(cat appliances/v86/dist/manifest.sha256)" ]]; then
             echo 'Generated manifest.sha256 does not match the verified appliance bundle' >&2
             exit 1
@@ -423,6 +424,11 @@ jobs:
             appliances/v86/dist/manifest.json
             appliances/v86/dist/manifest.sha256
             appliances/v86/dist/router-bzimage.bin
+            appliances/v86/dist/rootfs-complete.squashfs
+            appliances/v86/dist/rootfs-base.squashfs
+            appliances/v86/dist/rootfs-bird.squashfs
+            appliances/v86/dist/rootfs-frr.squashfs
+            appliances/v86/dist/rootfs-toolbox.squashfs
             appliances/v86/dist/seabios.bin
             appliances/v86/dist/vgabios.bin
             appliances/v86/dist/v86.wasm
@@ -466,7 +472,7 @@ jobs:
         run: |
           set -euo pipefail
           manifest_line=$(node appliances/v86/scripts/verify-manifest.mjs \
-            --require-pgo-use appliances/v86/dist/manifest.json)
+            --require-pgo-use --require-filesystem appliances/v86/dist/manifest.json)
           if [[ "$manifest_line" != "$(cat appliances/v86/dist/manifest.sha256)" ]]; then
             echo 'Downloaded manifest.sha256 does not match the verified appliance bundle' >&2
             exit 1

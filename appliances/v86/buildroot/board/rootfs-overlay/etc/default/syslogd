@@ -1,0 +1,3 @@
+# The immutable SquashFS root has no writable /var/log. Keep the small host
+# supervisor log in the existing /run tmpfs and bound its memory footprint.
+SYSLOGD_ARGS="-O /run/messages -s 64 -b 1"

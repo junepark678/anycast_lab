@@ -6,6 +6,14 @@ import type {
   ApplianceKind as RuntimeApplianceKind,
 } from '../appliances/abi';
 import type { ApplianceRuntimeRegistry } from '../appliances/registry';
+import {
+  SHARED_GUEST_CAPACITY_GUIDANCE,
+  SHARED_GUEST_LIMITS,
+  inspectSharedBootstrapArchive,
+  inspectSharedGuestBootRequest,
+  type SharedGuestBootMetrics,
+  type SharedGuestNodeConfigContext,
+} from '../appliances/v86/shared-guest-contract';
 import { parseIp, parsePrefix } from '../core/ip';
 import type { LabFile, LabNode, LabProject } from '../core/types';
 import type {
@@ -20,6 +28,7 @@ export const FRR_NATIVE_WRAPPER = '/run/anycastlab/frr-entrypoint.sh';
 export const FRR_DAEMONS_FILE = '/etc/frr/daemons';
 export const FRR_CONFIG_FILE = '/etc/frr/frr.conf';
 export const CLIENT_NATIVE_EXECUTABLE = '/bin/sh';
+export const ENTRYPOINT_FAILURE_FILE = '/run/anycastlab/entrypoint.failure';
 
 /**
  * FRR's normal init wrapper reads this file. It is injected only when a
@@ -54,30 +63,218 @@ set -eu
 install -d -m 0755 /run/frr /var/log/frr
 chown -R frr:frr /etc/frr
 if [ -e /etc/frr/vtysh.conf ]; then chown frr:frrvty /etc/frr/vtysh.conf; fi
-rm -f /run/anycastlab/frr.ready
-/usr/libexec/anycastlab-frr start
+failure_file=${ENTRYPOINT_FAILURE_FILE}
+status_file=/run/anycastlab/frr-status.out
+start_output_file=/run/anycastlab/frr-start.out
+start_output_pipe=/run/anycastlab/frr-start.pipe
+start_done_file=/run/anycastlab/frr-start.done
+start_done_tmp=/run/anycastlab/frr-start.done.tmp
+start_session_file=/run/anycastlab/frr-start.pid
+start_session_tmp=/run/anycastlab/frr-start.pid.tmp
+start_pid=
+start_launcher_pid=
+stop_pid=
+umask 077
+rm -f /run/anycastlab/frr.ready "$failure_file" "$status_file" \
+  "$start_output_file" "$start_output_pipe" "$start_done_file" "$start_done_tmp" \
+  "$start_session_file" "$start_session_tmp"
+record_failure() {
+  printf '%s\\n' "$1" > "$failure_file"
+}
+signal_job() {
+  signal=$1
+  pid=$2
+  [ -n "$pid" ] || return 0
+  kill "-$signal" "-$pid" 2>/dev/null \
+    || kill "-$signal" "$pid" 2>/dev/null \
+    || true
+}
+terminate_start_job() {
+  pid=$start_pid
+  if [ -n "$pid" ]; then
+    signal_job TERM "$pid"
+    attempt=0
+    while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 5 ]; do
+      sleep 1
+      attempt=$((attempt + 1))
+    done
+    # The session leader may exit on TERM while a descendant ignores it; always
+    # target the original process group after the grace period.
+    signal_job KILL "$pid"
+  fi
+  if [ -n "$start_launcher_pid" ]; then
+    wait "$start_launcher_pid" 2>/dev/null || true
+  fi
+  if [ -n "$pid" ] && [ "$pid" != "$start_launcher_pid" ]; then
+    wait "$pid" 2>/dev/null || true
+  fi
+  start_pid=
+  start_launcher_pid=
+}
+stop_daemons() {
+  /usr/libexec/anycastlab-frr stop >/dev/null 2>&1 &
+  stop_pid=$!
+  attempt=0
+  while kill -0 "$stop_pid" 2>/dev/null && [ "$attempt" -lt 5 ]; do
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+  if kill -0 "$stop_pid" 2>/dev/null; then signal_job KILL "$stop_pid"; fi
+  wait "$stop_pid" 2>/dev/null || true
+  stop_pid=
+}
 cleanup() {
-  rm -f /run/anycastlab/frr.ready
-  /usr/libexec/anycastlab-frr stop >/dev/null 2>&1 || true
+  trap - EXIT INT TERM
+  terminate_start_job
+  rm -f /run/anycastlab/frr.ready "$status_file" \
+    "$start_output_file" "$start_output_pipe" "$start_done_file" "$start_done_tmp" \
+    "$start_session_file" "$start_session_tmp"
+  stop_daemons
 }
 trap cleanup EXIT
 trap 'exit 0' INT TERM
+last_status=0
+probe_status() {
+  rm -f "$status_file"
+  if [ ! -f /run/frr/watchfrr.pid ] || [ ! -r /run/frr/watchfrr.pid ]; then
+    printf '%s\\n' 'watchfrr pid file is missing' > "$status_file"
+    last_status=3
+    return 1
+  fi
+  if IFS= read -r watchfrr_pid < /run/frr/watchfrr.pid; then :; else watchfrr_pid=; fi
+  case "$watchfrr_pid" in
+    ''|0|*[!0-9]*)
+      printf '%s\\n' 'watchfrr pid file is invalid' > "$status_file"
+      last_status=22
+      return 1
+      ;;
+  esac
+  if ! kill -0 "$watchfrr_pid" 2>/dev/null; then
+    printf 'watchfrr process %s is not running\\n' "$watchfrr_pid" > "$status_file"
+    last_status=3
+    return 1
+  fi
+  last_status=0
+  return 0
+}
+failed_daemons() {
+  file=$1
+  [ -f "$file" ] || return 0
+  extracted=$(sed -n \
+    -e 's/^Status of \\([^:][^:]*\\): FAILED$/\\1/p' \
+    -e 's/^Failed to start \\([^!][^!]*\\)!$/\\1/p' \
+    "$file" \
+    | head -c 128 \
+    | tr '\\n' ',' \
+    | sed 's/,$//')
+  if [ -n "$extracted" ]; then
+    printf '%s' "$extracted"
+  else
+    head -c 128 "$file" \
+      | tr '\\n\\r\\t' '   ' \
+      | sed 's/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//'
+  fi
+}
+
+: | START_OUTPUT_FILE="$start_output_file" START_OUTPUT_PIPE="$start_output_pipe" \
+  START_DONE_FILE="$start_done_file" \
+  START_DONE_TMP="$start_done_tmp" START_SESSION_FILE="$start_session_file" \
+  START_SESSION_TMP="$start_session_tmp" \
+  setsid /bin/sh -c '
+    umask 077
+    printf "%s\\n" "$$" > "$START_SESSION_TMP"
+    mv -f "$START_SESSION_TMP" "$START_SESSION_FILE"
+    status=0
+    rm -f "$START_OUTPUT_PIPE"
+    mkfifo -m 0600 "$START_OUTPUT_PIPE" || status=125
+    if [ "$status" -eq 0 ]; then
+      # The FRR daemons retain their inherited stderr after frrinit returns.
+      # Drain it for their lifetime while retaining only the first 4 KiB. An
+      # RLIMIT_FSIZE here would be inherited and kill FRR with SIGXFSZ.
+      { head -c 4096; cat >/dev/null; } \
+        < "$START_OUTPUT_PIPE" > "$START_OUTPUT_FILE" &
+      /usr/libexec/anycastlab-frr start > "$START_OUTPUT_PIPE" 2>&1
+      status=$?
+      rm -f "$START_OUTPUT_PIPE"
+    fi
+    printf "%s\\n" "$status" > "$START_DONE_TMP"
+    mv -f "$START_DONE_TMP" "$START_DONE_FILE"
+    exit "$status"
+  ' &
+start_launcher_pid=$!
+session_attempt=0
+while [ ! -f "$start_session_file" ] && [ "$session_attempt" -lt 5 ]; do
+  sleep 1
+  session_attempt=$((session_attempt + 1))
+done
+if IFS= read -r session_pid < "$start_session_file"; then :; else session_pid=; fi
+case "$session_pid" in
+  ''|*[!0-9]*) start_pid=$start_launcher_pid ;;
+  *) start_pid=$session_pid ;;
+esac
+start_elapsed=0
+while [ ! -f "$start_done_file" ] && [ "$start_elapsed" -lt 75 ]; do
+  if ! kill -0 "$start_pid" 2>/dev/null; then break; fi
+  sleep 1
+  start_elapsed=$((start_elapsed + 1))
+done
+if [ ! -f "$start_done_file" ]; then
+  start_timed_out=0
+  if [ "$start_elapsed" -ge 75 ]; then start_timed_out=1; fi
+  terminate_start_job
+  failed=$(failed_daemons "$start_output_file")
+  if [ "$start_timed_out" -eq 1 ]; then
+    record_failure "FRR start timed out; failed: \${failed:-unknown}"
+  else
+    record_failure "FRR start exited without status; failed: \${failed:-unknown}"
+  fi
+  exit 1
+fi
+if IFS= read -r start_status < "$start_done_file"; then :; else start_status=125; fi
+case "$start_status" in ''|*[!0-9]*) start_status=125 ;; esac
+if [ -n "$start_launcher_pid" ]; then
+  wait "$start_launcher_pid" 2>/dev/null || true
+fi
+start_pid=
+start_launcher_pid=
+if [ "$start_status" -ne 0 ]; then
+  failed=$(failed_daemons "$start_output_file")
+  record_failure "FRR start failed; failed: \${failed:-unknown (status $start_status)}"
+  exit 1
+fi
 ready=0
 attempt=0
-while [ "$attempt" -lt 480 ]; do
-  if /usr/sbin/frrinit.sh status >/dev/null 2>&1; then ready=1; break; fi
+readiness_attempts=$((90 - start_elapsed))
+if [ "$readiness_attempts" -lt 1 ]; then readiness_attempts=1; fi
+while [ "$attempt" -lt "$readiness_attempts" ]; do
+  if probe_status; then
+    ready=1
+    break
+  fi
   attempt=$((attempt + 1))
-  sleep 0.25
+  sleep 1
 done
-[ "$ready" -eq 1 ] || { echo 'FRR did not become ready' >&2; exit 1; }
+[ "$ready" -eq 1 ] || {
+  failed=$(failed_daemons "$status_file")
+  record_failure "FRR readiness timed out; failed: \${failed:-unknown (status $last_status)}"
+  exit 1
+}
 touch /run/anycastlab/frr.ready
 failures=0
 while sleep 2; do
-  if /usr/sbin/frrinit.sh status >/dev/null 2>&1; then
+  if probe_status; then
     failures=0
+    rm -f "$failure_file"
   else
     failures=$((failures + 1))
-    [ "$failures" -lt 3 ] || exit 1
+    [ "$failures" -lt 3 ] || {
+      failed=$(failed_daemons "$status_file")
+      record_failure "FRR health check failed; failed: \${failed:-unknown (status $last_status)}"
+      # Keep the namespace and terminal alive after post-readiness daemon
+      # failures. An interactive network appliance must remain diagnosable and
+      # can be repaired in place; a later successful probe clears degradation.
+      failures=3
+    }
   fi
 done
 `;
@@ -100,6 +297,32 @@ export function analyzeNativeProject(
   const nodes = new Map(project.nodes.map((node) => [node.id, node]));
   const interfaces = new Set<string>();
   const macOwners = new Map<string, string>();
+  const guestMetrics: SharedGuestBootMetrics[] = [];
+  const guestNodes = project.nodes.filter((node) => node.kind !== 'switch');
+  const guestContexts = new Map<LabNode, SharedGuestNodeConfigContext>();
+  let nextGuestSlot = 1;
+  let nextGuestVlan = 100;
+  for (const node of guestNodes) {
+    const kind = runtimeKindForNode(node) ?? 'client';
+    const vlanIds = node.interfaces.map(() => nextGuestVlan++);
+    guestContexts.set(node, { slot: nextGuestSlot++, kind, vlanIds });
+  }
+
+  if (guestNodes.length > SHARED_GUEST_LIMITS.nodes) {
+    diagnostics.push({
+      severity: 'error',
+      code: 'native.guest-node-count',
+      message: `The topology has ${guestNodes.length} guest nodes; the shared Linux supervisor supports at most ${SHARED_GUEST_LIMITS.nodes}.`,
+      path: 'nodes',
+    });
+  } else if (guestNodes.length > SHARED_GUEST_CAPACITY_GUIDANCE.recommendedNodes) {
+    diagnostics.push({
+      severity: 'warning',
+      code: 'native.guest-memory-pressure',
+      message: `The topology has ${guestNodes.length} guest nodes sharing ${SHARED_GUEST_CAPACITY_GUIDANCE.memoryBytes / (1024 * 1024)} MiB; more than ${SHARED_GUEST_CAPACITY_GUIDANCE.recommendedNodes} nodes may run out of memory depending on enabled daemons and routes.`,
+      path: 'nodes',
+    });
+  }
 
   for (const [index, node] of project.nodes.entries()) {
     const path = `nodes[${index}]`;
@@ -256,6 +479,39 @@ export function analyzeNativeProject(
       });
     }
 
+    if (runtimeKind !== null) {
+      try {
+        // Isolating the node prevents an unrelated malformed explicit MAC from
+        // hiding this node's guest-limit diagnostics. Generated MACs remain
+        // byte-identical because their seed includes the project and node ids.
+        const request = buildNativeBootRequest({ ...project, nodes: [node] }, node);
+        const inspection = inspectSharedGuestBootRequest(request, guestContexts.get(node));
+        guestMetrics.push(inspection.metrics);
+        for (const violation of inspection.violations) {
+          diagnostics.push({
+            severity: 'error',
+            code: `native.guest-${violation.code}`,
+            message: `${node.name}: ${violation.message}`,
+            nodeId: node.id,
+            path: violation.path.length === 0 ? path : `${path}.${violation.path}`,
+          });
+        }
+      } catch (error) {
+        const alreadyDiagnosed = diagnostics.some(
+          (diagnostic) => diagnostic.severity === 'error' && diagnostic.nodeId === node.id,
+        );
+        if (!alreadyDiagnosed) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'native.guest-boot-request',
+            message: error instanceof Error ? error.message : String(error),
+            nodeId: node.id,
+            path,
+          });
+        }
+      }
+    }
+
     if (runtimeKind !== null && registry !== undefined) {
       try {
         const factory = registry.resolve({
@@ -308,6 +564,34 @@ export function analyzeNativeProject(
         });
       }
       usedEndpoints.add(key);
+    }
+  }
+
+  if (guestMetrics.length === guestNodes.length) {
+    const bootstrap = inspectSharedBootstrapArchive(guestMetrics);
+    if (bootstrap.payloadBytes > SHARED_GUEST_LIMITS.bootstrapArchivePayloadBytes) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'native.guest-bootstrap-payload-bytes',
+        message: `The shared bootstrap payload is ${formatMiB(bootstrap.payloadBytes)} MiB; the guest limit is ${formatMiB(SHARED_GUEST_LIMITS.bootstrapArchivePayloadBytes)} MiB.`,
+        path: 'nodes',
+      });
+    }
+    if (bootstrap.entries > SHARED_GUEST_LIMITS.bootstrapArchiveEntries) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'native.guest-bootstrap-entries',
+        message: `The shared bootstrap requires ${bootstrap.entries} entries; the guest limit is ${SHARED_GUEST_LIMITS.bootstrapArchiveEntries}.`,
+        path: 'nodes',
+      });
+    }
+    if (bootstrap.bytes > SHARED_GUEST_LIMITS.bootstrapArchiveBytes) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'native.guest-bootstrap-bytes',
+        message: `The shared bootstrap requires ${formatMiB(bootstrap.bytes)} MiB; the guest limit is ${formatMiB(SHARED_GUEST_LIMITS.bootstrapArchiveBytes)} MiB.`,
+        path: 'nodes',
+      });
     }
   }
 
@@ -515,4 +799,8 @@ function shellQuote(value: string): string {
 
 function endpointKey(nodeId: string, interfaceId: string): string {
   return `${nodeId}\u0000${interfaceId}`;
+}
+
+function formatMiB(bytes: number): string {
+  return (bytes / (1024 * 1024)).toFixed(1).replace(/\.0$/, '');
 }
