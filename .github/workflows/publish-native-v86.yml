@@ -167,8 +167,9 @@ jobs:
         uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: appliances/v86/.work/ccache
-          key: native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-${{ github.run_id }}
+          key: native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-generate-${{ github.run_id }}
           restore-keys: |
+            native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-generate-
             native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-
             native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-
 
@@ -212,6 +213,14 @@ jobs:
             throw new Error('Training bundle PGO context does not match this workflow');
           }
           NODE
+
+      - name: Save the verified training compiler cache
+        if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch' && steps.pgo_profile_cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: appliances/v86/.work/ccache
+          key: native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-generate-${{ github.run_id }}
 
       - name: Build the instrumented lab
         if: steps.pgo_profile_cache.outputs.cache-hit != 'true'
@@ -268,8 +277,9 @@ jobs:
         uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: appliances/v86/.work/ccache
-          key: native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-${{ github.run_id }}
+          key: native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-use-${{ steps.pgo_profiles.outputs.build_key }}-${{ github.run_id }}
           restore-keys: |
+            native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-use-${{ steps.pgo_profiles.outputs.build_key }}-
             native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-
             native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-
 
@@ -315,6 +325,30 @@ jobs:
           }
           NODE
 
+      - name: Save the verified PGO profile set
+        if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch' && steps.pgo_profile_cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: appliances/v86/.work/pgo/profiles
+          key: native-v86-pgo-profiles-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.pgo_context.outputs.digest }}
+
+      - name: Save the verified optimized compiler cache
+        if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch' && steps.final_bundle_cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: appliances/v86/.work/ccache
+          key: native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-use-${{ steps.pgo_profiles.outputs.build_key }}-${{ github.run_id }}
+
+      - name: Save the verified final native bundle
+        if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch' && steps.final_bundle_cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: appliances/v86/dist
+          key: native-v86-pgo-bundle-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-${{ steps.pgo_profiles.outputs.build_key }}
+
       - name: Build the final lab
         run: bun run build:required
 
@@ -344,27 +378,6 @@ jobs:
             appliances/v86/.work/downloads
             appliances/v86/.work/buildroot-downloads
           key: native-v86-downloads-${{ hashFiles('appliances/v86/versions.env', 'appliances/v86/buildroot/**') }}
-
-      - name: Save the verified Buildroot compiler cache
-        if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch' && (steps.pgo_profile_cache.outputs.cache-hit != 'true' || steps.final_bundle_cache.outputs.cache-hit != 'true')
-        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        with:
-          path: appliances/v86/.work/ccache
-          key: native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-${{ github.run_id }}
-
-      - name: Save the verified PGO profile set
-        if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch' && steps.pgo_profile_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        with:
-          path: appliances/v86/.work/pgo/profiles
-          key: native-v86-pgo-profiles-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.pgo_context.outputs.digest }}
-
-      - name: Save the verified final native bundle
-        if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch' && steps.final_bundle_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        with:
-          path: appliances/v86/dist
-          key: native-v86-pgo-bundle-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.appliance_inputs.outputs.digest }}-${{ steps.pgo_profiles.outputs.build_key }}
 
       - name: Upload the validated PGO profile set
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

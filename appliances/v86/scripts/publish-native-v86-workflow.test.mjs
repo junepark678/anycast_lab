@@ -119,21 +119,23 @@ describe('native v86 PGO publication workflow', () => {
     const trainingCcache = step('Restore the Buildroot compiler cache for training');
     expect(trainingCcache).toContain(trustedWrite);
     expect(trainingCcache).toContain("steps.pgo_profile_cache.outputs.cache-hit != 'true'");
-    expect(trainingCcache).toContain('native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-');
+    expect(trainingCcache).toContain('-generate-${{ github.run_id }}');
     const optimizedCcache = step('Restore the Buildroot compiler cache for the optimized build');
     expect(optimizedCcache).toContain(trustedWrite);
     expect(optimizedCcache).toContain("steps.pgo_profile_cache.outputs.cache-hit == 'true'");
     expect(optimizedCcache).toContain("steps.final_bundle_cache.outputs.cache-hit != 'true'");
-    expect(optimizedCcache).toContain('native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-');
-    expect(workflow.split(
-      '            native-v86-ccache-v1-${{ runner.os }}-${{ runner.arch }}-\n',
-    )).toHaveLength(3);
-    expect(step('Save the verified Buildroot compiler cache')).toContain(trustedWrite);
+    expect(optimizedCcache).toContain('-use-${{ steps.pgo_profiles.outputs.build_key }}-${{ github.run_id }}');
+    const trainingCcacheSave = step('Save the verified training compiler cache');
+    expect(trainingCcacheSave).toContain(trustedWrite);
+    expect(trainingCcacheSave).toContain('-generate-${{ github.run_id }}');
+    const optimizedCcacheSave = step('Save the verified optimized compiler cache');
+    expect(optimizedCcacheSave).toContain(trustedWrite);
+    expect(optimizedCcacheSave).toContain('-use-${{ steps.pgo_profiles.outputs.build_key }}-${{ github.run_id }}');
     expect(step('Save the verified final native bundle')).toContain(trustedWrite);
     expect(step('Restore pinned source downloads')).not.toContain('refs/heads/master');
   });
 
-  it('publishes split caches only after mandatory final verification and before unrelated E2E', () => {
+  it('checkpoints expensive verified stages without exposing the release before acceptance', () => {
     const mandatory = [
       'Build the final lab',
       'Run the TypeScript check',
@@ -146,19 +148,33 @@ describe('native v86 PGO publication workflow', () => {
       expect(stepIndex(mandatory[index])).toBeGreaterThan(stepIndex(mandatory[index - 1]));
     }
 
-    const saveSteps = [
-      'Save verified source downloads',
-      'Save the verified Buildroot compiler cache',
+    const checkpointSteps = [
+      'Save the verified training compiler cache',
       'Save the verified PGO profile set',
+      'Save the verified optimized compiler cache',
       'Save the verified final native bundle',
     ];
+    for (const name of checkpointSteps) {
+      expect(step(name)).toContain('uses: actions/cache/save@');
+      expect(step(name)).toContain('continue-on-error: true');
+    }
+    expect(stepIndex('Save the verified training compiler cache'))
+      .toBeGreaterThan(stepIndex('Verify the instrumented native bundle'));
+    expect(stepIndex('Save the verified training compiler cache'))
+      .toBeLessThan(stepIndex('Build the instrumented lab'));
+    for (const name of [
+      'Save the verified PGO profile set',
+      'Save the verified optimized compiler cache',
+      'Save the verified final native bundle',
+    ]) {
+      expect(stepIndex(name)).toBeGreaterThan(stepIndex('Verify the optimized native bundle and profile provenance'));
+      expect(stepIndex(name)).toBeLessThan(stepIndex('Build the final lab'));
+    }
+
     const finalNative = stepIndex('Run the final native browser test');
     const remainingE2e = stepIndex('Run the remaining browser tests');
-    for (const name of saveSteps) {
-      expect(step(name)).toContain('uses: actions/cache/save@');
-      expect(stepIndex(name)).toBeGreaterThan(finalNative);
-      expect(stepIndex(name)).toBeLessThan(remainingE2e);
-    }
+    expect(stepIndex('Save verified source downloads')).toBeGreaterThan(finalNative);
+    expect(stepIndex('Save verified source downloads')).toBeLessThan(remainingE2e);
     expect(step('Restore pinned source downloads')).toContain('uses: actions/cache/restore@');
     expect(step('Restore the Buildroot compiler cache for training')).toContain('uses: actions/cache/restore@');
     expect(step('Restore the Buildroot compiler cache for the optimized build'))
