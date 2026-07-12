@@ -3,8 +3,8 @@ import { expect, test } from '@playwright/test';
 test('opens the starter topology and edits a native config', async ({ page }) => {
   await page.goto('./');
   await expect(page.getByRole('textbox', { name: 'Project name' })).toHaveValue('Two-PoP anycast lab');
-  await expect(page.getByText('PoP · Seoul', { exact: true })).toBeVisible();
-  await page.getByText('PoP · Seoul', { exact: true }).click();
+  await expect(page.getByTestId('rf__node-pop-seoul')).toBeVisible();
+  await page.getByTestId('rf__node-pop-seoul').click();
   await page.getByRole('button', { name: 'Open native configuration' }).click();
   await expect(page.getByRole('region', { name: 'PoP · Seoul configuration' })).toBeVisible();
   await expect(page.getByText('bird.conf', { exact: true })).toBeVisible();
@@ -72,7 +72,7 @@ test('adds a new FRR appliance with a native configuration workspace', async ({ 
 
 test('edits interface addressing and adds an included config file', async ({ page }) => {
   await page.goto('./');
-  await page.getByText('PoP · Seoul', { exact: true }).click();
+  await page.getByTestId('rf__node-pop-seoul').click();
   const addresses = page.getByRole('textbox', { name: 'eth0 addresses' });
   await addresses.fill('192.0.2.1/31, 2001:db8:1::1/64');
   await expect(addresses).toHaveValue('192.0.2.1/31, 2001:db8:1::1/64');
@@ -155,7 +155,7 @@ test('selects and autosaves the version-pinned native VM fidelity', async ({ pag
   await native.click();
   await expect(native).toBeChecked();
   await expect(page.getByText(/no compatibility fallback/)).toBeVisible();
-  await page.getByText('PoP · Seoul', { exact: true }).click();
+  await page.getByTestId('rf__node-pop-seoul').click();
   await expect(page.locator('.runtime-card')).toContainText('BIRD 2.15.1 · native Linux VM');
   await expect(page.getByText('Native daemon · isolated VM')).toBeVisible();
   await expect(page.getByText('Saved locally')).toBeVisible({ timeout: 5_000 });

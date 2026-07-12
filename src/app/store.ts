@@ -16,7 +16,7 @@ interface LabStore {
   diagnostics: ConfigDiagnostic[];
   snapshot: EngineSnapshot | null;
   trace: PacketTrace | null;
-  terminalLines: TerminalLine[];
+  terminalLinesByNode: Record<string, TerminalLine[]>;
   setProject(project: LabProject): void;
   markSaved(project: Pick<LabProject, 'id' | 'updatedAt'>): void;
   markSaving(): void;
@@ -28,7 +28,7 @@ interface LabStore {
   updateNodes(changes: NodeChange<LabCanvasNode>[]): void;
   updateEdges(changes: EdgeChange<LabCanvasEdge>[]): void;
   connect(connection: Connection): void;
-  addNode(kind: NodeKind): void;
+  addNode(kind: NodeKind, position?: { x: number; y: number }): void;
   patchNode(id: string, patch: Partial<LabNode>): void;
   setNodeInterfaces(id: string, interfaces: LabInterface[]): void;
   patchLink(id: string, patch: Partial<LabLink>): void;
@@ -40,7 +40,8 @@ interface LabStore {
   setDiagnostics(diagnostics: ConfigDiagnostic[]): void;
   setSnapshot(snapshot: EngineSnapshot | null): void;
   setTrace(trace: PacketTrace | null): void;
-  appendTerminal(stream: TerminalLine['stream'], text: string): void;
+  appendTerminal(nodeId: string, stream: TerminalLine['stream'], text: string): void;
+  clearTerminal(nodeId: string): void;
   resetRuntime(): void;
 }
 
@@ -50,6 +51,12 @@ function markChanged(project: LabProject): Pick<LabStore, 'project' | 'dirty' | 
     ? Math.max(Date.now(), previousTimestamp + 1)
     : Date.now();
   return { project: { ...project, updatedAt: new Date(nextTimestamp).toISOString() }, dirty: true, saveState: 'saved' };
+}
+
+function applianceTerminalLines(project: LabProject, message: string): Record<string, TerminalLine[]> {
+  return Object.fromEntries(project.nodes
+    .filter((node) => node.kind !== 'switch')
+    .map((node) => [node.id, [{ id: `${node.id}-${newId('line')}`, stream: 'system' as const, text: message }]]));
 }
 
 function viewKind(node: LabNode): NodeKind {
@@ -68,6 +75,7 @@ function nodeToCanvas(node: LabNode, snapshot?: EngineSnapshot | null, engineRun
       label: node.name,
       kind: viewKind(node),
       location: node.tags?.[0],
+      enabled: node.state === 'up',
       status: node.state === 'down' ? 'stopped' : engineRunning
         ? runtimeState?.running || (runtimeState === undefined && node.appliance.runtime === 'wasm') ? 'running' : 'starting'
         : 'stopped',
@@ -160,8 +168,18 @@ function availableInterface(node: LabNode, links: LabLink[]): { node: LabNode; i
 export const useLabStore = create<LabStore>((set, get) => ({
   project: createExampleProject(), running: false, dirty: false, saveState: 'saved', selection: null,
   editorNodeId: null, editorPath: null, diagnostics: [], snapshot: null, trace: null,
-  terminalLines: [{ id: 'welcome', stream: 'system', text: 'Anycast Lab · select a router, then try “show protocols” or “show route”.' }],
-  setProject: (project) => set({ project, dirty: false, saveState: 'saved', selection: null, editorNodeId: null, editorPath: null, snapshot: null, trace: null }),
+  terminalLinesByNode: applianceTerminalLines(createExampleProject(), 'Appliance console ready. Try “show protocols”, “show route”, or “ip addr”.'),
+  setProject: (project) => set({
+    project,
+    dirty: false,
+    saveState: 'saved',
+    selection: null,
+    editorNodeId: null,
+    editorPath: null,
+    snapshot: null,
+    trace: null,
+    terminalLinesByNode: applianceTerminalLines(project, 'Appliance console ready.'),
+  }),
   markSaved: (savedProject) => set((state) => (
     state.project.id === savedProject.id && state.project.updatedAt === savedProject.updatedAt
       ? { dirty: false, saveState: 'saved' }
@@ -212,9 +230,16 @@ export const useLabStore = create<LabStore>((set, get) => ({
     const link: LabLink = { id: newId('link'), endpoints: [{ nodeId: source.id, interfaceId: sourceResult.interfaceId }, { nodeId: target.id, interfaceId: targetResult.interfaceId }], state: 'up', latencyMs: 10, jitterMs: 0, loss: 0, bandwidthMbps: 1000 };
     return markChanged({ ...project, nodes: project.nodes.map((node) => node.id === source?.id ? source : node.id === target?.id ? target : node), links: [...project.links, link] });
   }),
-  addNode: (kind) => set(({ project }) => {
-    const node = makeNode(kind, project.nodes.length);
-    return { ...markChanged({ ...project, nodes: [...project.nodes, node] }), selection: { kind: 'node', id: node.id } as Selection };
+  addNode: (kind, position) => set(({ project, terminalLinesByNode }) => {
+    const node = { ...makeNode(kind, project.nodes.length), ...(position ? { position } : {}) };
+    return {
+      ...markChanged({ ...project, nodes: [...project.nodes, node] }),
+      selection: { kind: 'node', id: node.id } as Selection,
+      terminalLinesByNode: node.kind === 'switch' ? terminalLinesByNode : {
+        ...terminalLinesByNode,
+        [node.id]: [{ id: `${node.id}-${newId('line')}`, stream: 'system', text: 'Appliance console ready.' }],
+      },
+    };
   }),
   patchNode: (id, patch) => set(({ project }) => markChanged({ ...project, nodes: project.nodes.map((node) => node.id === id ? { ...node, ...patch } : node) })),
   setNodeInterfaces: (id, interfaces) => set(({ project }) => {
@@ -226,9 +251,18 @@ export const useLabStore = create<LabStore>((set, get) => ({
     });
   }),
   patchLink: (id, patch) => set(({ project }) => markChanged({ ...project, links: project.links.map((link) => link.id === id ? { ...link, ...patch } : link) })),
-  deleteSelection: () => set(({ project, selection }) => {
+  deleteSelection: () => set(({ project, selection, terminalLinesByNode }) => {
     if (!selection) return {};
-    if (selection.kind === 'node') return { ...markChanged({ ...project, nodes: project.nodes.filter((node) => node.id !== selection.id), links: project.links.filter((link) => link.endpoints.every((endpoint) => endpoint.nodeId !== selection.id)) }), selection: null, editorNodeId: null, editorPath: null };
+    if (selection.kind === 'node') {
+      const { [selection.id]: _removedTerminal, ...remainingTerminals } = terminalLinesByNode;
+      return {
+        ...markChanged({ ...project, nodes: project.nodes.filter((node) => node.id !== selection.id), links: project.links.filter((link) => link.endpoints.every((endpoint) => endpoint.nodeId !== selection.id)) }),
+        selection: null,
+        editorNodeId: null,
+        editorPath: null,
+        terminalLinesByNode: remainingTerminals,
+      };
+    }
     return { ...markChanged({ ...project, links: project.links.filter((link) => link.id !== selection.id) }), selection: null };
   }),
   openConfig: (nodeId) => {
@@ -241,6 +275,20 @@ export const useLabStore = create<LabStore>((set, get) => ({
   setDiagnostics: (diagnostics) => set({ diagnostics }),
   setSnapshot: (snapshot) => set({ snapshot }),
   setTrace: (trace) => set({ trace }),
-  appendTerminal: (stream, text) => set(({ terminalLines }) => ({ terminalLines: [...terminalLines.slice(-499), { id: newId('line'), stream, text }] })),
-  resetRuntime: () => set({ running: false, snapshot: null, trace: null, diagnostics: [], terminalLines: [{ id: newId('line'), stream: 'system', text: 'Runtime reset.' }] }),
+  appendTerminal: (nodeId, stream, text) => set(({ terminalLinesByNode }) => ({
+    terminalLinesByNode: {
+      ...terminalLinesByNode,
+      [nodeId]: [...(terminalLinesByNode[nodeId] ?? []).slice(-499), { id: newId('line'), stream, text }],
+    },
+  })),
+  clearTerminal: (nodeId) => set(({ terminalLinesByNode }) => ({
+    terminalLinesByNode: { ...terminalLinesByNode, [nodeId]: [] },
+  })),
+  resetRuntime: () => set(({ project }) => ({
+    running: false,
+    snapshot: null,
+    trace: null,
+    diagnostics: [],
+    terminalLinesByNode: applianceTerminalLines(project, 'Runtime reset. Appliance console ready.'),
+  })),
 }));

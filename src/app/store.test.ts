@@ -29,6 +29,27 @@ describe('lab editor store', () => {
     expect(state.dirty).toBe(true);
   });
 
+  it('places a dragged appliance at the requested flow position', () => {
+    useLabStore.getState().addNode('client', { x: 612, y: 347 });
+    expect(useLabStore.getState().project.nodes.at(-1)?.position).toEqual({ x: 612, y: 347 });
+  });
+
+  it('keeps appliance console scrollback isolated', () => {
+    const state = useLabStore.getState();
+    state.appendTerminal('pop-seoul', 'input', 'seoul$ show protocols');
+    state.appendTerminal('pop-seoul', 'output', 'seoul-only-output');
+    state.appendTerminal('pop-frankfurt', 'input', 'frankfurt$ show bgp summary');
+
+    let terminals = useLabStore.getState().terminalLinesByNode;
+    expect(terminals['pop-seoul']?.map((line) => line.text)).toContain('seoul-only-output');
+    expect(terminals['pop-frankfurt']?.map((line) => line.text)).not.toContain('seoul-only-output');
+
+    useLabStore.getState().clearTerminal('pop-seoul');
+    terminals = useLabStore.getState().terminalLinesByNode;
+    expect(terminals['pop-seoul']).toEqual([]);
+    expect(terminals['pop-frankfurt']?.map((line) => line.text)).toContain('frankfurt$ show bgp summary');
+  });
+
   it('preserves config text exactly while editing', () => {
     const node = useLabStore.getState().project.nodes.find((candidate) => candidate.id === 'pop-seoul');
     const path = node?.files[0]?.path;

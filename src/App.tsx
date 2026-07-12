@@ -96,6 +96,13 @@ function traceViews(trace: PacketTrace | null): TraceHopView[] {
   }));
 }
 
+function appendRuntimeMessage(stream: 'system' | 'error', message: string): void {
+  const state = useLabStore.getState();
+  for (const node of state.project.nodes) {
+    if (node.kind !== 'switch') state.appendTerminal(node.id, stream, message);
+  }
+}
+
 export default function App() {
   const store = useLabStore();
   const canvas = useMemo(() => projectCanvas(store.project, store.snapshot, store.running), [store.project, store.running, store.snapshot]);
@@ -117,6 +124,8 @@ export default function App() {
   const [nativeAvailability, setNativeAvailability] = useState<NativeRuntimeAvailability | null>(null);
   const [nativeEvents, setNativeEvents] = useState<TimelineEventView[]>([]);
   const [runtimeBusy, setRuntimeBusy] = useState(false);
+  const [consoleFocusRequest, setConsoleFocusRequest] = useState(0);
+  const [consoleNodeId, setConsoleNodeId] = useState(() => store.project.nodes.find((node) => node.kind !== 'switch')?.id ?? '');
   const [persistenceReady, setPersistenceReady] = useState(false);
   const [nativeProjectLocked, setNativeProjectLocked] = useState(false);
   const runtimeMode = useMemo<'simulation' | 'native'>(
@@ -264,14 +273,14 @@ export default function App() {
     nativeTerminalLineBuffersRef.current.clear();
     setNativeEvents([]);
     setNativeProjectLocked(true);
-    const nodeNames = new Map(project.nodes.map((node) => [node.id, node.name]));
     const engine = new NativeLabEngine(structuredClone(project), nativeRegistry(), {
       autoRun: true,
       onEvent: (event) => {
         if (event.type === 'engine.state' && event.detail?.state === 'failed') {
           const active = useLabStore.getState();
           active.setRunning(false);
-          active.appendTerminal('error', event.message);
+          if (event.nodeId) active.appendTerminal(event.nodeId, 'error', event.message);
+          else appendRuntimeMessage('error', event.message);
           setNativeProjectLocked(false);
           setToast('A native appliance failed. Inspect its serial output, fix the config, then reset and run again.');
         }
@@ -292,8 +301,9 @@ export default function App() {
         nativeTerminalLineBuffersRef.current.set(output.nodeId, consumed.pending);
         if (consumed.complete.length > 0) {
           useLabStore.getState().appendTerminal(
+            output.nodeId,
             'output',
-            `[${nodeNames.get(output.nodeId) ?? output.nodeId}] ${consumed.complete}`,
+            consumed.complete,
           );
         }
       },
@@ -308,7 +318,7 @@ export default function App() {
       if (store.running) {
         if (runtimeMode === 'native') {
           await nativeEngineRef.current?.pause();
-          store.appendTerminal('system', 'Native VMs paused. Their machine state is preserved in memory.');
+          appendRuntimeMessage('system', 'Native VMs paused. Their machine state is preserved in memory.');
         }
         store.setRunning(false);
         return;
@@ -325,29 +335,29 @@ export default function App() {
         const estimate = nativeMemoryEstimate(nativeVmCount, nativeAvailability.memoryBytes);
         const existing = nativeEngineRef.current;
         if (existing?.state === 'paused') {
-          store.appendTerminal('system', 'Resuming native Linux VMs…');
+          appendRuntimeMessage('system', 'Resuming native Linux VMs…');
           await existing.resume();
         } else {
-          store.appendTerminal('system', `Booting ${nativeVmCount} isolated Linux VMs (${estimate}) and executing the project files unchanged…`);
+          appendRuntimeMessage('system', `Booting ${nativeVmCount} isolated Linux VMs (${estimate}) and executing each appliance project independently…`);
           const nativeEngine = await rebuildNativeEngine();
           await nativeEngine.start();
         }
         const descriptors = nativeEngineRef.current?.runtimeDescriptors() ?? {};
-        store.appendTerminal('system', `Native fabric is running · ${Object.keys(descriptors).length} real appliances · raw Ethernet capture enabled.`);
+        appendRuntimeMessage('system', `Native fabric is running · ${Object.keys(descriptors).length} real appliances · raw Ethernet capture enabled.`);
         return;
       }
 
       store.setRunning(true);
-      store.appendTerminal('system', 'Starting appliances and converging protocols…');
+      appendRuntimeMessage('system', 'Starting appliances and converging protocols…');
       const engine = await rebuildEngine();
       await engine.converge();
       const snapshot = engine.snapshot();
       store.setSnapshot(snapshot);
-      store.appendTerminal('system', `Converged at ${(snapshot.nowMs / 1000).toFixed(3)}s · ${snapshot.sessions.filter((session) => session.state === 'established').length} sessions established.`);
+      appendRuntimeMessage('system', `Converged at ${(snapshot.nowMs / 1000).toFixed(3)}s · ${snapshot.sessions.filter((session) => session.state === 'established').length} sessions established.`);
     } catch (error) {
       store.setRunning(false);
       if (runtimeMode === 'native') setNativeProjectLocked(false);
-      store.appendTerminal('error', error instanceof Error ? error.message : String(error));
+      appendRuntimeMessage('error', error instanceof Error ? error.message : String(error));
       setToast('The topology could not start. Check the configuration diagnostics.');
     } finally {
       finishRuntimeOperation();
@@ -359,7 +369,13 @@ export default function App() {
   const selectedCanvasNode = selectedNode ? canvas.nodes.find((node) => node.id === selectedNode.id) : undefined;
   const selectedCanvasLink = selectedLink ? canvas.edges.find((edge) => edge.id === selectedLink.id) : undefined;
   const editorNode = store.editorNodeId ? store.project.nodes.find((node) => node.id === store.editorNodeId) : undefined;
+  const consoleNodes = store.project.nodes.filter((node) => node.kind !== 'switch');
+  const consoleNode = consoleNodes.find((node) => node.id === consoleNodeId) ?? consoleNodes[0];
   const configFiles: ConfigFileView[] = (editorNode?.files ?? []).map((file) => ({ path: file.path, contents: file.content, language: editorNode?.appliance.kind === 'bird' ? 'bird' : editorNode?.appliance.kind === 'frr' ? 'frr' : 'plaintext' }));
+
+  useEffect(() => {
+    if (consoleNode && consoleNode.id !== consoleNodeId) setConsoleNodeId(consoleNode.id);
+  }, [consoleNode, consoleNodeId]);
 
   const onNodeChanges = useCallback((changes: Parameters<typeof onNodesChangeBase>[0]) => {
     onNodesChangeBase(changes);
@@ -411,11 +427,9 @@ export default function App() {
   }, []);
 
   const runCommand = useCallback(async (command: string) => {
-    const node = selectedNode && selectedNode.kind !== 'switch' ? selectedNode
-      : store.project.nodes.find((candidate) => candidate.kind === 'router' || candidate.kind === 'route-server')
-        ?? store.project.nodes.find((candidate) => candidate.kind !== 'switch');
+    const node = consoleNode;
     if (!node) return;
-    store.appendTerminal('input', `${node.name}$ ${command}`);
+    store.appendTerminal(node.id, 'input', `${node.name}$ ${command}`);
     try {
       if (runtimeMode === 'native') {
         await sendNativeCommand(node.id, command);
@@ -424,16 +438,16 @@ export default function App() {
       const engine = engineRef.current ?? await rebuildEngine();
       if (!store.snapshot) { await engine.converge(); store.setSnapshot(engine.snapshot()); }
       const result = await engine.terminal(node.id, command);
-      store.appendTerminal(result.exitCode === 0 ? 'output' : 'error', result.output || '(no output)');
-    } catch (error) { store.appendTerminal('error', error instanceof Error ? error.message : String(error)); }
-  }, [rebuildEngine, runtimeMode, selectedNode, sendNativeCommand, store]);
+      store.appendTerminal(node.id, result.exitCode === 0 ? 'output' : 'error', result.output || '(no output)');
+    } catch (error) { store.appendTerminal(node.id, 'error', error instanceof Error ? error.message : String(error)); }
+  }, [consoleNode, rebuildEngine, runtimeMode, sendNativeCommand, store]);
 
   const runTrace = useCallback(async (sourceNodeId: string, destination: string) => {
     try {
       if (runtimeMode === 'native') {
         if (!/^[a-zA-Z0-9_.:%-]+$/.test(destination)) throw new Error('Enter an IP address or hostname to trace.');
         const source = store.project.nodes.find((node) => node.id === sourceNodeId);
-        store.appendTerminal('input', `${source?.name ?? sourceNodeId}$ traceroute -n -m 16 ${destination}`);
+        store.appendTerminal(sourceNodeId, 'input', `${source?.name ?? sourceNodeId}$ traceroute -n -m 16 ${destination}`);
         await sendNativeCommand(sourceNodeId, `traceroute -n -m 16 ${destination}`);
         store.setTrace(null);
         setToast('Native traceroute started. Raw Ethernet frames are being captured for PCAPNG export.');
@@ -456,30 +470,49 @@ export default function App() {
     });
   }, [selectedNode, store]);
 
-  const patchSelectedLink = useCallback((patch: Partial<LabLinkViewData>) => {
-    if (!selectedLink || runtimeOperationRef.current) return;
-    store.patchLink(selectedLink.id, {
-      state: patch.enabled === undefined ? selectedLink.state : patch.enabled ? 'up' : 'down',
-      latencyMs: patch.latencyMs ?? selectedLink.latencyMs,
-      jitterMs: patch.jitterMs ?? selectedLink.jitterMs,
-      loss: patch.lossPercent === undefined ? selectedLink.loss : patch.lossPercent / 100,
-      bandwidthMbps: patch.bandwidthMbps ?? selectedLink.bandwidthMbps,
+  const patchLink = useCallback((linkId: string, patch: Partial<LabLinkViewData>) => {
+    if (runtimeOperationRef.current) return;
+    const link = useLabStore.getState().project.links.find((candidate) => candidate.id === linkId);
+    if (!link) return;
+    store.patchLink(linkId, {
+      state: patch.enabled === undefined ? link.state : patch.enabled ? 'up' : 'down',
+      latencyMs: patch.latencyMs ?? link.latencyMs,
+      jitterMs: patch.jitterMs ?? link.jitterMs,
+      loss: patch.lossPercent === undefined ? link.loss : patch.lossPercent / 100,
+      bandwidthMbps: patch.bandwidthMbps ?? link.bandwidthMbps,
     });
     if (
       nativeEngineRef.current &&
       ['running', 'paused', 'stopped'].includes(nativeEngineRef.current.state) &&
       patch.enabled !== undefined
     ) {
-      void nativeEngineRef.current.setLinkState(selectedLink.id, patch.enabled ? 'up' : 'down')
-        .catch((error: unknown) => store.appendTerminal('error', error instanceof Error ? error.message : String(error)));
+      void nativeEngineRef.current.setLinkState(linkId, patch.enabled ? 'up' : 'down')
+        .catch((error: unknown) => appendRuntimeMessage('error', error instanceof Error ? error.message : String(error)));
     } else if (engineRef.current && patch.enabled !== undefined) {
-      engineRef.current.setLinkState(selectedLink.id, patch.enabled ? 'up' : 'down');
+      engineRef.current.setLinkState(linkId, patch.enabled ? 'up' : 'down');
       void engineRef.current.converge().then(() => store.setSnapshot(engineRef.current?.snapshot() ?? null));
     }
     if ((patch.latencyMs !== undefined || patch.jitterMs !== undefined || patch.lossPercent !== undefined || patch.bandwidthMbps !== undefined) && (engineRef.current || nativeEngineRef.current)) {
       setToast('Restart the runtime to apply changed link characteristics.');
     }
-  }, [selectedLink, store]);
+  }, [store]);
+
+  const patchSelectedLink = useCallback((patch: Partial<LabLinkViewData>) => {
+    if (selectedLink) patchLink(selectedLink.id, patch);
+  }, [patchLink, selectedLink]);
+
+  const toggleNodeState = useCallback((nodeId: string, enabled: boolean) => {
+    if (runtimeOperationRef.current) return;
+    const state = enabled ? 'up' : 'down';
+    store.patchNode(nodeId, { state });
+    if (nativeEngineRef.current && ['running', 'paused', 'stopped'].includes(nativeEngineRef.current.state)) {
+      void nativeEngineRef.current.setNodeState(nodeId, state)
+        .catch((error: unknown) => store.appendTerminal(nodeId, 'error', error instanceof Error ? error.message : String(error)));
+    } else if (engineRef.current) {
+      engineRef.current.setNodeState(nodeId, state);
+      void engineRef.current.converge().then(() => store.setSnapshot(engineRef.current?.snapshot() ?? null));
+    }
+  }, [store]);
 
   const disposeRuntime = useCallback(async (): Promise<void> => {
     const compatibility = engineRef.current;
@@ -502,7 +535,7 @@ export default function App() {
       setNativeProjectLocked(false);
       store.resetRuntime();
     } catch (error) {
-      store.appendTerminal('error', error instanceof Error ? error.message : String(error));
+      appendRuntimeMessage('error', error instanceof Error ? error.message : String(error));
     } finally {
       finishRuntimeOperation();
     }
@@ -521,7 +554,7 @@ export default function App() {
       setNativeProjectLocked(false);
       store.resetRuntime();
       store.setRuntimeMode(mode);
-      store.appendTerminal('system', mode === 'native'
+      appendRuntimeMessage('system', mode === 'native'
         ? 'Native VM mode selected. Run boots real BIRD, FRR, client, and service appliances; there is no compatibility fallback.'
         : 'Simulation mode selected. This deterministic compatibility engine is fast, but does not execute the upstream daemons.');
       if (mode === 'native' && nativeAvailability?.available) {
@@ -603,6 +636,28 @@ export default function App() {
       : nativeAvailability.reason;
   const projectMutationLocked = nativeProjectLocked || runtimeBusy;
 
+  const selectTopologyItem = useCallback((selection: Parameters<typeof store.setSelection>[0]) => {
+    store.setSelection(selection);
+    if (selection?.kind === 'node') {
+      const node = useLabStore.getState().project.nodes.find((candidate) => candidate.id === selection.id);
+      if (node?.kind !== 'switch') setConsoleNodeId(selection.id);
+    }
+  }, [store]);
+
+  const addAppliance = useCallback((kind: Parameters<typeof store.addNode>[0], position?: { x: number; y: number }) => {
+    store.addNode(kind, position);
+    const added = useLabStore.getState().project.nodes.at(-1);
+    if (added && added.kind !== 'switch') setConsoleNodeId(added.id);
+  }, [store]);
+
+  const openNodeConsole = useCallback((nodeId: string) => {
+    const node = useLabStore.getState().project.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node || node.kind === 'switch') return;
+    store.setSelection({ kind: 'node', id: nodeId });
+    setConsoleNodeId(nodeId);
+    setConsoleFocusRequest((current) => current + 1);
+  }, [store]);
+
   return (
     <div className={`lab-shell${editorNode ? ' is-editor-open' : ''}`}>
       <LabHeader
@@ -626,8 +681,27 @@ export default function App() {
         onImport={(event) => void importProject(event)}
       />
       <main className={`lab-main${editorNode ? ' has-editor' : ''}`}>
-        <Palette onAdd={store.addNode} disabled={projectMutationLocked} />
-        <TopologyCanvas nodes={nodes} edges={edges} selection={store.selection} onNodesChange={onNodeChanges} onEdgesChange={onEdgeChanges} onConnect={onConnect} onSelect={store.setSelection} structuralLocked={projectMutationLocked} />
+        <Palette onAdd={addAppliance} disabled={projectMutationLocked} />
+        <TopologyCanvas
+          nodes={nodes}
+          edges={edges}
+          selection={store.selection}
+          onNodesChange={onNodeChanges}
+          onEdgesChange={onEdgeChanges}
+          onConnect={onConnect}
+          onSelect={selectTopologyItem}
+          onAddNode={addAppliance}
+          onOpenNodeConfig={store.openConfig}
+          onOpenNodeConsole={openNodeConsole}
+          onToggleNode={toggleNodeState}
+          onToggleLink={(linkId, enabled) => patchLink(linkId, { enabled })}
+          onDeleteItem={(selection) => {
+            store.setSelection(selection);
+            useLabStore.getState().deleteSelection();
+          }}
+          structuralLocked={projectMutationLocked}
+          operationsLocked={runtimeBusy}
+        />
         {editorNode ? (
           <Suspense fallback={<section className="config-workspace"><div className="empty-editor">Loading configuration editor…</div></section>}><ConfigWorkspace
             nodeLabel={editorNode.name}
@@ -667,35 +741,29 @@ export default function App() {
             onServiceAddressesChange={(addresses) => store.patchNode(selectedNode.id, { service: { addresses, protocols: selectedNode.service?.protocols ?? ['icmp'] } })}
             onDelete={store.deleteSelection}
             onOpenConfig={() => store.openConfig(selectedNode.id)}
-            onToggleState={() => {
-              if (runtimeOperationRef.current) return;
-              const state = selectedNode.state === 'up' ? 'down' : 'up';
-              store.patchNode(selectedNode.id, { state });
-              if (nativeEngineRef.current && ['running', 'paused', 'stopped'].includes(nativeEngineRef.current.state)) {
-                void nativeEngineRef.current.setNodeState(selectedNode.id, state)
-                  .catch((error: unknown) => store.appendTerminal('error', error instanceof Error ? error.message : String(error)));
-              } else if (engineRef.current) {
-                engineRef.current.setNodeState(selectedNode.id, state);
-                void engineRef.current.converge().then(() => store.setSnapshot(engineRef.current?.snapshot() ?? null));
-              }
-            }}
+            onToggleState={() => toggleNodeState(selectedNode.id, selectedNode.state !== 'up')}
           />
         ) : selectedCanvasLink && selectedLink ? (
           <LinkInspector edge={selectedCanvasLink} onPatch={patchSelectedLink} onDelete={store.deleteSelection} locked={projectMutationLocked} operationalDisabled={runtimeBusy} />
         ) : <EmptyInspector />}
       </main>
       <BottomPanel
-        terminalTitle={selectedNode
-          ? `${selectedNode.name} · ${runtimeMode === 'native' ? 'serial shell' : selectedNode.appliance.kind === 'frr' ? 'vtysh-compatible console' : selectedNode.appliance.kind === 'bird' ? 'birdc-compatible console' : 'shell'}`
-          : runtimeMode === 'native' ? 'Native VM console' : 'Lab console'}
-        terminalLines={store.terminalLines}
+        terminalTitle={consoleNode
+          ? `${consoleNode.name} · ${runtimeMode === 'native' ? 'isolated serial shell' : consoleNode.appliance.kind === 'frr' ? 'isolated vtysh-compatible console' : consoleNode.appliance.kind === 'bird' ? 'isolated birdc-compatible console' : 'isolated shell'}`
+          : 'No appliance console'}
+        terminalLines={consoleNode ? store.terminalLinesByNode[consoleNode.id] ?? [] : []}
+        consoleTargets={consoleNodes.map((node) => ({ id: node.id, label: node.name }))}
+        activeConsoleId={consoleNode?.id ?? ''}
+        onConsoleChange={setConsoleNodeId}
         trace={runtimeMode === 'native' ? [] : traceViews(store.trace)}
         events={runtimeMode === 'native' ? [...nativeEvents].reverse() : eventViews(store.snapshot)}
         runtimeMode={runtimeMode}
         onCommand={(command) => void runCommand(command)}
+        onClearTerminal={() => { if (consoleNode) store.clearTerminal(consoleNode.id); }}
         onTrace={(source, destination) => void runTrace(source, destination)}
         onExportCapture={exportCapture}
         clients={store.project.nodes.filter((node) => node.kind === 'client').map((node) => ({ id: node.id, label: node.name }))}
+        focusRequest={consoleFocusRequest}
       />
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>
