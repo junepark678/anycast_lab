@@ -126,6 +126,53 @@ test('drags a palette appliance to the exact canvas drop point', async ({ page }
   await expect(page.getByRole('combobox', { name: 'Console appliance' })).toHaveValue(/bird-/);
 });
 
+test('rejects unsupported and invalid appliance drop payloads without mutating the topology', async ({ page }) => {
+  await page.goto('./');
+
+  const canvas = page.getByTestId('topology-canvas');
+  const nodes = page.locator('.react-flow__node');
+  const initialCount = await nodes.count();
+
+  await canvas.evaluate((element) => {
+    const unsupported = new DataTransfer();
+    unsupported.setData('application/json', JSON.stringify({ kind: 'bird' }));
+    element.dispatchEvent(new DragEvent('dragover', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 300,
+      clientY: 200,
+      dataTransfer: unsupported,
+    }));
+    element.dispatchEvent(new DragEvent('drop', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 300,
+      clientY: 200,
+      dataTransfer: unsupported,
+    }));
+
+    const invalidKind = new DataTransfer();
+    invalidKind.setData('text/plain', 'definitely-not-an-appliance');
+    element.dispatchEvent(new DragEvent('dragover', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 320,
+      clientY: 220,
+      dataTransfer: invalidKind,
+    }));
+    element.dispatchEvent(new DragEvent('drop', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 320,
+      clientY: 220,
+      dataTransfer: invalidKind,
+    }));
+  });
+
+  await expect(nodes).toHaveCount(initialCount);
+  await expect(canvas).not.toHaveClass(/topology-canvas--drag-over/);
+});
+
 test('provides node, link, and canvas right-click actions', async ({ page }) => {
   await page.goto('./');
 
@@ -163,6 +210,177 @@ test('provides node, link, and canvas right-click actions', async ({ page }) => 
   await expect(menu.getByRole('menuitem', { name: 'Fit topology to view' })).toBeVisible();
   await menu.getByRole('menuitem', { name: 'Add Client' }).click();
   await expect(page.locator('.react-flow__node')).toHaveCount(nodeCount + 1);
+});
+
+test('supports keyboard navigation and focus restoration in topology context menus', async ({ page }) => {
+  await page.goto('./');
+
+  const node = page.getByTestId('rf__node-pop-frankfurt');
+  await node.click({ button: 'right' });
+  const menu = page.getByRole('menu', { name: 'PoP · Frankfurt actions' });
+  const first = menu.getByRole('menuitem', { name: 'Open console' });
+  const last = menu.getByRole('menuitem', { name: 'Delete node' });
+
+  await expect(first).toBeFocused();
+  await menu.press('ArrowUp');
+  await expect(last).toBeFocused();
+  await menu.press('ArrowDown');
+  await expect(first).toBeFocused();
+  await menu.press('End');
+  await expect(last).toBeFocused();
+  await menu.press('Escape');
+
+  await expect(menu).toBeHidden();
+  await expect(node).toBeFocused();
+});
+
+test('minimizes and restores both side toolbars while giving space back to the canvas', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('./');
+
+  const canvas = page.getByTestId('topology-canvas');
+  const initial = await canvas.boundingBox();
+  expect(initial).not.toBeNull();
+
+  await page.getByRole('button', { name: 'Collapse workspace toolbar' }).click();
+  await expect(page.getByRole('button', { name: 'Expand workspace toolbar' })).toBeVisible();
+  const afterHeader = await canvas.boundingBox();
+  expect(afterHeader).not.toBeNull();
+  expect(afterHeader!.height).toBeGreaterThan(initial!.height + 10);
+
+  await page.getByRole('button', { name: 'Collapse appliance palette' }).click();
+  await expect(page.getByRole('button', { name: 'Expand appliance palette' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /BIRD/ })).toBeHidden();
+  const afterPalette = await canvas.boundingBox();
+  expect(afterPalette).not.toBeNull();
+  expect(afterPalette!.width).toBeGreaterThan(initial!.width + 50);
+
+  await page.getByRole('button', { name: 'Collapse details panel' }).click();
+  await expect(page.getByRole('button', { name: 'Expand details panel' })).toBeVisible();
+  const afterDetails = await canvas.boundingBox();
+  expect(afterDetails).not.toBeNull();
+  expect(afterDetails!.width).toBeGreaterThan(afterPalette!.width + 100);
+
+  await page.getByRole('button', { name: 'Expand appliance palette' }).click();
+  await expect(page.getByRole('button', { name: 'Collapse appliance palette' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /BIRD/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Expand details panel' }).click();
+  await expect(page.getByRole('button', { name: 'Collapse details panel' })).toBeVisible();
+  await page.getByRole('button', { name: 'Expand workspace toolbar' }).click();
+  await expect(page.getByRole('button', { name: 'Collapse workspace toolbar' })).toBeVisible();
+});
+
+test('persists the workspace side-panel layout locally', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('./');
+
+  await page.getByRole('button', { name: 'Collapse appliance palette' }).click();
+  await page.getByRole('button', { name: 'Collapse details panel' }).click();
+  await page.getByRole('button', { name: 'Collapse workspace toolbar' }).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('anycast-lab:workspace-layout:v1'))).not.toBeNull();
+  await expect.poll(() => page.evaluate(() => {
+    const value = localStorage.getItem('anycast-lab:workspace-layout:v1');
+    return value ? JSON.parse(value) : null;
+  })).toMatchObject({ paletteCollapsed: true, detailsCollapsed: true, headerCollapsed: true });
+
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Expand appliance palette' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Expand details panel' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Expand workspace toolbar' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Expand appliance palette' }).click();
+  await page.getByRole('button', { name: 'Expand details panel' }).click();
+  await page.getByRole('button', { name: 'Expand workspace toolbar' }).click();
+  await expect.poll(() => page.evaluate(() => {
+    const value = localStorage.getItem('anycast-lab:workspace-layout:v1');
+    return value ? JSON.parse(value) : null;
+  })).toMatchObject({ paletteCollapsed: false, detailsCollapsed: false, headerCollapsed: false });
+});
+
+test('opens a BIRD configuration at 900px without horizontal overflow or collapsing the canvas', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 800 });
+  await page.goto('./');
+
+  await page.getByTestId('rf__node-pop-seoul').click();
+  await page.getByRole('button', { name: 'Open native configuration' }).click();
+
+  const editor = page.getByRole('region', { name: 'PoP · Seoul configuration' });
+  const canvas = page.getByTestId('topology-canvas');
+  const labMain = page.locator('.lab-main');
+  await expect(editor).toBeVisible();
+  await expect(page.getByRole('textbox', { name: '/etc/bird/bird.conf contents' })).toBeVisible();
+  await expect.poll(async () => (await canvas.boundingBox())?.width ?? 0).toBeGreaterThanOrEqual(300);
+
+  const layout = await page.evaluate(() => {
+    const main = document.querySelector<HTMLElement>('.lab-main');
+    const editor = document.querySelector<HTMLElement>('.config-workspace');
+    if (!main || !editor) throw new Error('Expected the lab main and configuration workspace');
+    const mainBounds = main.getBoundingClientRect();
+    const editorBounds = editor.getBoundingClientRect();
+    return {
+      viewportWidth: document.documentElement.clientWidth,
+      documentWidth: document.documentElement.scrollWidth,
+      mainClientWidth: main.clientWidth,
+      mainScrollWidth: main.scrollWidth,
+      editorLeft: editorBounds.left,
+      editorRight: editorBounds.right,
+      mainLeft: mainBounds.left,
+      mainRight: mainBounds.right,
+    };
+  });
+
+  expect(layout.documentWidth).toBeLessThanOrEqual(layout.viewportWidth);
+  expect(layout.mainScrollWidth).toBeLessThanOrEqual(layout.mainClientWidth + 1);
+  expect(layout.editorLeft).toBeGreaterThanOrEqual(layout.mainLeft - 1);
+  expect(layout.editorRight).toBeLessThanOrEqual(layout.mainRight + 1);
+  await expect(labMain).toBeVisible();
+});
+
+test('keeps the mobile workspace usable with overlay side panels and no horizontal clipping', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('./');
+
+  const canvas = page.getByTestId('topology-canvas');
+  await expect(page.getByRole('button', { name: 'Expand appliance palette' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Expand details panel' })).toBeVisible();
+  await expect.poll(async () => (await canvas.boundingBox())?.width ?? 0).toBeGreaterThanOrEqual(300);
+  const collapsedWidth = (await canvas.boundingBox())!.width;
+
+  await page.getByRole('button', { name: 'Expand appliance palette' }).click();
+  await expect(page.getByRole('button', { name: /BIRD/ })).toBeVisible();
+  await expect.poll(async () => (await canvas.boundingBox())?.width ?? 0).toBeGreaterThanOrEqual(collapsedWidth - 1);
+  await page.getByRole('button', { name: 'Collapse appliance palette' }).click();
+
+  await page.getByRole('button', { name: 'Expand details panel' }).click();
+  await expect(page.getByRole('button', { name: 'Collapse details panel' })).toBeVisible();
+  await expect.poll(async () => (await canvas.boundingBox())?.width ?? 0).toBeGreaterThanOrEqual(collapsedWidth - 1);
+
+  await expect.poll(() => page.evaluate(() => ({
+    viewport: document.documentElement.clientWidth,
+    content: document.documentElement.scrollWidth,
+  }))).toEqual({ viewport: 390, content: 390 });
+});
+
+test('switches compact dock views without clipping their content', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('./');
+
+  const compactViews = page.getByRole('navigation', { name: 'Compact dock views' });
+  const consoleView = page.getByRole('region', { name: 'Console', exact: true });
+  const activityView = page.getByRole('region', { name: 'Network activity' });
+  await expect(compactViews).toBeVisible();
+  await expect(consoleView).toBeVisible();
+  await expect(activityView).toBeHidden();
+
+  await compactViews.getByRole('button', { name: 'Activity' }).click();
+  await expect(activityView).toBeVisible();
+  await expect(consoleView).toBeHidden();
+  await expect.poll(() => activityView.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+
+  await compactViews.getByRole('button', { name: 'Console' }).click();
+  await expect(consoleView).toBeVisible();
+  await expect(activityView).toBeHidden();
+  await expect.poll(() => consoleView.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
 });
 
 test('keeps the console visually separate and gives the dock direct controls', async ({ page }) => {

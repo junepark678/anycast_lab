@@ -101,4 +101,82 @@ describe('AutosaveCoordinator', () => {
     expect(autosave.getState().status).toBe('disposed');
     expect(() => autosave.schedule(project('too late'))).toThrow(/disposed/);
   });
+
+  it('retains a failed snapshot and recovers on the next flush', async () => {
+    const repository = new MemoryProjectRepository<TestProject>();
+    const save = repository.save.bind(repository);
+    const saved = vi.fn();
+    const states: string[] = [];
+    let fail = true;
+    repository.save = async (...args) => {
+      if (fail) {
+        fail = false;
+        throw new Error('temporary quota failure');
+      }
+      return save(...args);
+    };
+    const autosave = new AutosaveCoordinator({
+      repository,
+      delayMs: 10_000,
+      onSaved: saved,
+      onStateChange: (state) => states.push(state.status),
+    });
+
+    autosave.schedule(project('retry me'));
+    await expect(autosave.flush()).rejects.toThrow('temporary quota failure');
+    expect(autosave.getState()).toMatchObject({
+      status: 'error',
+      dirty: true,
+      projectId: 'project-1',
+    });
+    expect(await repository.get('project-1')).toBeUndefined();
+    expect(saved).not.toHaveBeenCalled();
+
+    await expect(autosave.flush()).resolves.toMatchObject({
+      project: { name: 'retry me' },
+      revision: 1,
+    });
+    expect(autosave.getState()).toMatchObject({ status: 'saved', dirty: false, revision: 1 });
+    expect(saved).toHaveBeenCalledOnce();
+    expect(states).toEqual(['scheduled', 'saving', 'error', 'saving', 'saved']);
+  });
+
+  it('lets a newer edit supersede a failed in-flight snapshot', async () => {
+    const repository = new MemoryProjectRepository<TestProject>();
+    const save = repository.save.bind(repository);
+    let rejectFirst!: (reason: Error) => void;
+    const firstWrite = new Promise<never>((_, reject) => { rejectFirst = reject; });
+    let calls = 0;
+    repository.save = async (...args) => {
+      calls += 1;
+      if (calls === 1) return firstWrite;
+      return save(...args);
+    };
+    const autosave = new AutosaveCoordinator({ repository, delayMs: 10_000 });
+
+    autosave.schedule(project('outdated'));
+    const failedFlush = autosave.flush();
+    await Promise.resolve();
+    autosave.schedule(project('newest'));
+    rejectFirst(new Error('first write failed'));
+    await expect(failedFlush).rejects.toThrow('first write failed');
+
+    await autosave.flush();
+    expect(calls).toBe(2);
+    expect((await repository.get('project-1'))?.project.name).toBe('newest');
+    expect(autosave.getState()).toMatchObject({ status: 'saved', dirty: false });
+  });
+
+  it('can dispose without flushing a pending mutation', async () => {
+    vi.useFakeTimers();
+    const repository = new MemoryProjectRepository<TestProject>();
+    const autosave = new AutosaveCoordinator({ repository, delayMs: 10_000 });
+    autosave.schedule(project('discard me'));
+
+    await autosave.dispose({ flush: false });
+    await vi.runAllTimersAsync();
+
+    expect(await repository.get('project-1')).toBeUndefined();
+    expect(autosave.getState()).toMatchObject({ status: 'disposed', dirty: false });
+  });
 });

@@ -20,6 +20,7 @@ import {
 import type { TerminalLine, TimelineEventView, TraceHopView } from '../view-types';
 
 type ActivityTab = 'trace' | 'events';
+type CompactPane = 'console' | 'activity';
 
 interface Props {
   terminalTitle: string;
@@ -36,6 +37,7 @@ interface Props {
   onExportCapture?: () => void;
   clients: Array<{ id: string; label: string }>;
   focusRequest?: number;
+  guideFocusTarget?: string | null;
 }
 
 const DEFAULT_DOCK_HEIGHT = 272;
@@ -61,8 +63,10 @@ export function BottomPanel({
   onExportCapture,
   clients,
   focusRequest = 0,
+  guideFocusTarget = null,
 }: Props) {
   const [tab, setTab] = useState<ActivityTab>('trace');
+  const [compactPane, setCompactPane] = useState<CompactPane>('console');
   const [command, setCommand] = useState('');
   const [source, setSource] = useState(clients[0]?.id ?? '');
   const [destination, setDestination] = useState('203.0.113.53');
@@ -83,8 +87,21 @@ export function BottomPanel({
   useEffect(() => {
     if (focusRequest === 0) return;
     setCollapsed(false);
+    setCompactPane('console');
     requestAnimationFrame(() => inputRef.current?.focus());
   }, [focusRequest]);
+
+  useEffect(() => {
+    if (guideFocusTarget === 'console') {
+      setCollapsed(false);
+      setCompactPane('console');
+    }
+    if (guideFocusTarget === 'trace') {
+      setCollapsed(false);
+      setCompactPane('activity');
+      setTab('trace');
+    }
+  }, [guideFocusTarget]);
 
   useEffect(() => {
     const toggleDock = (event: KeyboardEvent) => {
@@ -172,8 +189,13 @@ export function BottomPanel({
           <button type="button" className="dock-icon-button" onClick={() => setCollapsed(false)} aria-label="Expand console dock" title="Expand dock (Ctrl+`)"><ChevronUp size={15} /></button>
         </div>
       ) : (
-        <div className="dock-grid">
-          <section className="console-panel" aria-label="Console">
+        <>
+        <nav className="dock-compact-tabs" aria-label="Compact dock views">
+          <button type="button" className={compactPane === 'console' ? 'is-active' : ''} aria-pressed={compactPane === 'console'} onClick={() => setCompactPane('console')}><TerminalSquare size={14} /> Console</button>
+          <button type="button" className={compactPane === 'activity' ? 'is-active' : ''} aria-pressed={compactPane === 'activity'} onClick={() => setCompactPane('activity')}><Activity size={14} /> Activity</button>
+        </nav>
+        <div className="dock-grid" data-compact-pane={compactPane}>
+          <section className="console-panel" aria-label="Console" data-guide-target="console">
             <header className="dock-header">
               <span className="dock-header__title">
                 <TerminalSquare size={15} />
@@ -215,7 +237,7 @@ export function BottomPanel({
             </div>
           </section>
 
-          <section className="activity-panel" aria-label="Network activity">
+          <section className="activity-panel" aria-label="Network activity" data-guide-target="trace">
             <nav className="bottom-tabs" aria-label="Network activity views">
               <button type="button" className={tab === 'trace' ? 'is-active' : ''} onClick={() => setTab('trace')}><Route size={15} /> Packet trace {trace.length > 0 && <b>{trace.length}</b>}</button>
               <button type="button" className={tab === 'events' ? 'is-active' : ''} onClick={() => setTab('events')}><Activity size={15} /> Events {events.length > 0 && <b>{events.length}</b>}</button>
@@ -249,6 +271,7 @@ export function BottomPanel({
             )}
           </section>
         </div>
+        </>
       )}
     </section>
   );

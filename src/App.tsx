@@ -1,4 +1,5 @@
 import { useEdgesState, useNodesState, type Connection } from '@xyflow/react';
+import { PanelRightClose, PanelRightOpen } from 'lucide-react';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import { ApplianceRuntimeRegistry } from './appliances';
 import {
@@ -36,7 +37,44 @@ import type { ConfigFileView, LabLinkViewData, LabNodeViewData, TimelineEventVie
 import './styles.css';
 
 const LAST_PROJECT_KEY = 'anycast-lab:last-project';
+const WORKSPACE_LAYOUT_KEY = 'anycast-lab:workspace-layout:v1';
+const EMBEDDED_WORKSPACE_LAYOUT_KEY = 'anycast-lab:guide-layout:v1';
+const GUIDE_FOCUS_TARGETS = new Set(['run', 'runtime', 'console', 'trace', 'topology', 'export']);
 const ConfigWorkspace = lazy(() => import('./app/components/ConfigWorkspace').then((module) => ({ default: module.ConfigWorkspace })));
+
+interface WorkspaceLayout {
+  paletteCollapsed: boolean;
+  detailsCollapsed: boolean;
+  headerCollapsed: boolean;
+}
+
+function workspaceContext(): { embedded: boolean; compact: boolean; narrowHeader: boolean } {
+  const embedded = new URLSearchParams(window.location.search).get('embed') === 'guide';
+  return {
+    embedded,
+    compact: window.matchMedia('(max-width: 700px)').matches,
+    narrowHeader: window.matchMedia('(max-width: 1100px)').matches,
+  };
+}
+
+function initialWorkspaceLayout(context: ReturnType<typeof workspaceContext>, storageKey: string): WorkspaceLayout {
+  const fallback: WorkspaceLayout = {
+    paletteCollapsed: context.embedded || context.compact,
+    detailsCollapsed: context.embedded || context.compact,
+    headerCollapsed: context.embedded || context.narrowHeader,
+  };
+  try {
+    const saved = JSON.parse(localStorage.getItem(storageKey) ?? 'null') as Partial<WorkspaceLayout> | null;
+    if (!saved) return fallback;
+    return {
+      paletteCollapsed: typeof saved.paletteCollapsed === 'boolean' ? saved.paletteCollapsed : fallback.paletteCollapsed,
+      detailsCollapsed: typeof saved.detailsCollapsed === 'boolean' ? saved.detailsCollapsed : fallback.detailsCollapsed,
+      headerCollapsed: typeof saved.headerCollapsed === 'boolean' ? saved.headerCollapsed : fallback.headerCollapsed,
+    };
+  } catch {
+    return fallback;
+  }
+}
 
 function saveBlob(bytes: Uint8Array, filename: string, mediaType = ANYCAST_LAB_ARCHIVE_MIME): void {
   const part = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
@@ -112,6 +150,10 @@ function sameProjectRevision(first: LabProject, second: LabProject): boolean {
 }
 
 export default function App() {
+  const context = useMemo(workspaceContext, []);
+  const workspaceLayoutKey = context.embedded ? EMBEDDED_WORKSPACE_LAYOUT_KEY : WORKSPACE_LAYOUT_KEY;
+  const [workspaceLayout, setWorkspaceLayout] = useState(() => initialWorkspaceLayout(context, workspaceLayoutKey));
+  const [guideFocusTarget, setGuideFocusTarget] = useState<string | null>(null);
   const store = useLabStore();
   const canvas = useMemo(() => projectCanvas(store.project, store.snapshot, store.running), [store.project, store.running, store.snapshot]);
   const [nodes, setNodes, onNodesChangeBase] = useNodesState(canvas.nodes);
@@ -146,6 +188,17 @@ export default function App() {
     [store.project.nodes],
   );
 
+  const updateWorkspaceLayout = useCallback((patch: Partial<WorkspaceLayout>, persist = true) => {
+    setWorkspaceLayout((current) => {
+      const next = { ...current, ...patch };
+      if (persist) {
+        try { localStorage.setItem(workspaceLayoutKey, JSON.stringify(next)); }
+        catch { /* Layout preferences are optional when storage is unavailable. */ }
+      }
+      return next;
+    });
+  }, [workspaceLayoutKey]);
+
   const beginRuntimeOperation = useCallback((): boolean => {
     if (runtimeOperationRef.current) return false;
     runtimeOperationRef.current = true;
@@ -159,6 +212,20 @@ export default function App() {
   }, []);
 
   useEffect(() => { setNodes(canvas.nodes); setEdges(canvas.edges); }, [canvas, setEdges, setNodes]);
+
+  useEffect(() => {
+    if (!context.embedded) return;
+    const receiveGuideStep = (event: MessageEvent) => {
+      if (event.source !== window.parent || event.origin !== window.location.origin || event.data?.type !== 'anycast-guide:focus') return;
+      const target = typeof event.data.target === 'string' ? event.data.target : '';
+      if (!GUIDE_FOCUS_TARGETS.has(target)) return;
+      setGuideFocusTarget(target);
+      if (target === 'runtime' || target === 'export') updateWorkspaceLayout({ headerCollapsed: false }, false);
+    };
+    window.addEventListener('message', receiveGuideStep);
+    window.parent.postMessage({ type: 'anycast-lab:ready' }, window.location.origin);
+    return () => window.removeEventListener('message', receiveGuideStep);
+  }, [context.embedded, updateWorkspaceLayout]);
 
   useEffect(() => {
     const deploymentBase = new URL(import.meta.env.BASE_URL, window.location.href).href;
@@ -705,8 +772,16 @@ export default function App() {
     setConsoleFocusRequest((current) => current + 1);
   }, [store]);
 
+  const openNodeConfig = useCallback((nodeId: string) => {
+    updateWorkspaceLayout({ detailsCollapsed: false });
+    store.openConfig(nodeId);
+  }, [store, updateWorkspaceLayout]);
+
   return (
-    <div className={`lab-shell${editorNode ? ' is-editor-open' : ''}`}>
+    <div
+      className={`lab-shell${editorNode ? ' is-editor-open' : ''}${context.embedded ? ' is-embedded' : ''}${workspaceLayout.headerCollapsed ? ' is-header-collapsed' : ''}`}
+      data-guide-focus={guideFocusTarget ?? undefined}
+    >
       <LabHeader
         projectName={store.project.name}
         running={store.running}
@@ -719,6 +794,8 @@ export default function App() {
         nativeRuntimeState={nativeRuntimeState}
         nativeRuntimeDetail={nativeRuntimeDetail}
         fileInputRef={fileInputRef}
+        collapsed={workspaceLayout.headerCollapsed}
+        embedded={context.embedded}
         onProjectNameChange={store.renameProject}
         onRuntimeModeChange={(mode) => void changeRuntimeMode(mode)}
         onRunToggle={() => void run()}
@@ -726,9 +803,15 @@ export default function App() {
         onSave={() => void saveNow()}
         onExport={exportProject}
         onImport={(event) => void importProject(event)}
+        onToggleCollapsed={() => updateWorkspaceLayout({ headerCollapsed: !workspaceLayout.headerCollapsed })}
       />
-      <main className={`lab-main${editorNode ? ' has-editor' : ''}`}>
-        <Palette onAdd={addAppliance} disabled={projectMutationLocked} />
+      <main className={`lab-main${editorNode ? ' has-editor' : ''}${workspaceLayout.paletteCollapsed ? ' is-palette-collapsed' : ''}${workspaceLayout.detailsCollapsed ? ' is-details-collapsed' : ''}`}>
+        <Palette
+          onAdd={addAppliance}
+          disabled={projectMutationLocked}
+          collapsed={workspaceLayout.paletteCollapsed}
+          onToggle={() => updateWorkspaceLayout({ paletteCollapsed: !workspaceLayout.paletteCollapsed })}
+        />
         <TopologyCanvas
           nodes={nodes}
           edges={edges}
@@ -738,7 +821,7 @@ export default function App() {
           onConnect={onConnect}
           onSelect={selectTopologyItem}
           onAddNode={addAppliance}
-          onOpenNodeConfig={store.openConfig}
+          onOpenNodeConfig={openNodeConfig}
           onOpenNodeConsole={openNodeConsole}
           onToggleNode={toggleNodeState}
           onToggleLink={(linkId, enabled) => patchLink(linkId, { enabled })}
@@ -749,7 +832,19 @@ export default function App() {
           structuralLocked={projectMutationLocked}
           operationsLocked={runtimeBusy}
         />
-        {editorNode ? (
+        <div className={`details-panel${workspaceLayout.detailsCollapsed ? ' is-collapsed' : ''}`}>
+          <button
+            type="button"
+            className="details-panel__toggle"
+            aria-label={workspaceLayout.detailsCollapsed ? 'Expand details panel' : 'Collapse details panel'}
+            aria-expanded={!workspaceLayout.detailsCollapsed}
+            onClick={() => updateWorkspaceLayout({ detailsCollapsed: !workspaceLayout.detailsCollapsed })}
+            title={workspaceLayout.detailsCollapsed ? 'Expand details panel' : 'Collapse details panel'}
+          >
+            {workspaceLayout.detailsCollapsed ? <PanelRightOpen size={16} /> : <PanelRightClose size={16} />}
+            <span>Details</span>
+          </button>
+        {!workspaceLayout.detailsCollapsed && (editorNode ? (
           <Suspense fallback={<section className="config-workspace"><div className="empty-editor">Loading configuration editor…</div></section>}><ConfigWorkspace
             nodeLabel={editorNode.name}
             files={configFiles}
@@ -787,12 +882,13 @@ export default function App() {
             onDefaultGatewayChange={(defaultGateway) => store.patchNode(selectedNode.id, { client: { ...selectedNode.client, defaultGateway: defaultGateway || undefined } })}
             onServiceAddressesChange={(addresses) => store.patchNode(selectedNode.id, { service: { addresses, protocols: selectedNode.service?.protocols ?? ['icmp'] } })}
             onDelete={store.deleteSelection}
-            onOpenConfig={() => store.openConfig(selectedNode.id)}
+            onOpenConfig={() => openNodeConfig(selectedNode.id)}
             onToggleState={() => toggleNodeState(selectedNode.id, selectedNode.state !== 'up')}
           />
         ) : selectedCanvasLink && selectedLink ? (
           <LinkInspector edge={selectedCanvasLink} onPatch={patchSelectedLink} onDelete={store.deleteSelection} locked={projectMutationLocked} operationalDisabled={runtimeBusy} />
-        ) : <EmptyInspector />}
+        ) : <EmptyInspector />)}
+        </div>
       </main>
       <BottomPanel
         terminalTitle={consoleNode
@@ -811,6 +907,7 @@ export default function App() {
         onExportCapture={exportCapture}
         clients={store.project.nodes.filter((node) => node.kind === 'client').map((node) => ({ id: node.id, label: node.name }))}
         focusRequest={consoleFocusRequest}
+        guideFocusTarget={guideFocusTarget}
       />
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>

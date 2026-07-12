@@ -286,6 +286,7 @@ export function TopologyCanvas({
     <div
       className={`topology-canvas${isDropTarget ? ' topology-canvas--drag-over' : ''}`}
       data-testid="topology-canvas"
+      data-guide-target="topology"
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}

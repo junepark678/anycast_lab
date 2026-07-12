@@ -4,6 +4,8 @@ const CACHE_PREFIX = 'anycast-lab-';
 const PRECACHE = `${CACHE_PREFIX}${BUILD_ID}`;
 const APP_ROOT = new URL('./', self.registration.scope).href;
 const INDEX_URL = new URL('index.html', self.registration.scope).href;
+const APP_PATHNAME = new URL(APP_ROOT).pathname;
+const INDEX_PATHNAME = new URL(INDEX_URL).pathname;
 const PRECACHE_URLS = new Set(PRECACHE_FILES.map((fileName) => new URL(fileName, self.registration.scope).href));
 
 self.addEventListener('install', (event) => {
@@ -39,6 +41,10 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return;
 
   if (request.mode === 'navigate') {
+    // The guide lives below /lab/about/, inside this worker's unavoidable URL
+    // scope. Only the two actual app-shell paths may use the offline fallback;
+    // all guide and future sibling routes must remain owned by the parent site.
+    if (url.pathname !== APP_PATHNAME && url.pathname !== INDEX_PATHNAME) return;
     event.respondWith(navigate(event));
     return;
   }
