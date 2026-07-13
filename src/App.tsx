@@ -114,12 +114,16 @@ function workspaceContext(): { embedded: boolean; compact: boolean; narrowHeader
   };
 }
 
-function initialWorkspaceLayout(context: ReturnType<typeof workspaceContext>, storageKey: string): WorkspaceLayout {
-  const fallback: WorkspaceLayout = {
+function defaultWorkspaceLayout(context: ReturnType<typeof workspaceContext>): WorkspaceLayout {
+  return {
     paletteCollapsed: context.embedded || context.compact,
     detailsCollapsed: context.embedded || context.compact,
     headerCollapsed: context.embedded || context.narrowHeader,
   };
+}
+
+function initialWorkspaceLayout(context: ReturnType<typeof workspaceContext>, storageKey: string): WorkspaceLayout {
+  const fallback = defaultWorkspaceLayout(context);
   try {
     const saved = JSON.parse(localStorage.getItem(storageKey) ?? 'null') as Partial<WorkspaceLayout> | null;
     if (!saved) return fallback;
@@ -1091,6 +1095,38 @@ export default function App() {
       : nativeAvailability.reason;
   const projectMutationLocked = nativeProjectLocked || runtimeBusy;
 
+  useEffect(() => {
+    const handleWorkspaceShortcut = (event: KeyboardEvent) => {
+      if (projectManagerOpen) return;
+      const modifier = event.ctrlKey || event.metaKey;
+      const key = event.key.toLowerCase();
+
+      if (modifier && key === 's') {
+        event.preventDefault();
+        if (persistenceReady && !runtimeBusy) void saveNow();
+        return;
+      }
+
+      if (modifier && key === 'o') {
+        event.preventDefault();
+        if (persistenceReady && !runtimeBusy) fileInputRef.current?.click();
+        return;
+      }
+
+      const target = event.target;
+      const editingText = target instanceof HTMLElement
+        && (target.isContentEditable || target.matches('input, textarea, select'));
+      if ((event.key === 'Delete' || event.key === 'Backspace')
+        && !editingText && store.selection && !projectMutationLocked) {
+        event.preventDefault();
+        store.deleteSelection();
+      }
+    };
+
+    window.addEventListener('keydown', handleWorkspaceShortcut);
+    return () => window.removeEventListener('keydown', handleWorkspaceShortcut);
+  }, [persistenceReady, projectManagerOpen, projectMutationLocked, runtimeBusy, saveNow, store]);
+
   const selectTopologyItem = useCallback((selection: Parameters<typeof store.setSelection>[0]) => {
     store.setSelection(selection);
     if (selection?.kind === 'node') {
@@ -1152,6 +1188,13 @@ export default function App() {
         onExport={exportProject}
         onImport={(event) => void importProject(event)}
         onToggleCollapsed={() => updateWorkspaceLayout({ headerCollapsed: !workspaceLayout.headerCollapsed })}
+        selectionType={store.selection?.kind ?? null}
+        paletteCollapsed={workspaceLayout.paletteCollapsed}
+        detailsCollapsed={workspaceLayout.detailsCollapsed}
+        onDeleteSelection={store.deleteSelection}
+        onTogglePalette={() => updateWorkspaceLayout({ paletteCollapsed: !workspaceLayout.paletteCollapsed })}
+        onToggleDetails={() => updateWorkspaceLayout({ detailsCollapsed: !workspaceLayout.detailsCollapsed })}
+        onResetWorkspace={() => updateWorkspaceLayout(defaultWorkspaceLayout(workspaceContext()))}
       />
       <main className={`lab-main${editorNode ? ' has-editor' : ''}${workspaceLayout.paletteCollapsed ? ' is-palette-collapsed' : ''}${workspaceLayout.detailsCollapsed ? ' is-details-collapsed' : ''}`}>
         <Palette
