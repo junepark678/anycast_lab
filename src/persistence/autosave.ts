@@ -52,6 +52,10 @@ export class AutosaveCoordinator<TProject extends ProjectIdentity> {
   private pending?: TProject;
   private timer?: ReturnType<typeof setTimeout>;
   private drainPromise?: Promise<StoredProject<TProject> | undefined>;
+  private readonly expectedRevisions = new Map<
+    string,
+    { revision: number }
+  >();
   private disposed = false;
   private state: AutosaveState = { status: 'idle', dirty: false };
 
@@ -73,6 +77,29 @@ export class AutosaveCoordinator<TProject extends ProjectIdentity> {
 
   getState(): Readonly<AutosaveState> {
     return { ...this.state };
+  }
+
+  /**
+   * Enables optimistic concurrency for a project, or replaces the revision
+   * expected by its next save. Pass `undefined` to return that project to the
+   * repository's backward-compatible last-writer-wins behavior.
+   */
+  setExpectedRevision(projectId: string, revision: number | undefined): void {
+    this.assertActive();
+
+    if (revision === undefined) {
+      this.expectedRevisions.delete(projectId);
+      return;
+    }
+
+    if (!Number.isSafeInteger(revision) || revision < 0) {
+      throw new RangeError('Expected project revision must be a non-negative safe integer');
+    }
+
+    // Replace the entry object even when the numeric revision is unchanged.
+    // This lets a caller supersede an expectation while a save is in flight
+    // without that older write overwriting the caller's newer decision.
+    this.expectedRevisions.set(projectId, { revision });
   }
 
   schedule(project: TProject): void {
@@ -172,7 +199,21 @@ export class AutosaveCoordinator<TProject extends ProjectIdentity> {
       });
 
       try {
-        lastSaved = await this.repository.save(snapshot);
+        const expectedRevision = this.expectedRevisions.get(snapshot.id);
+        lastSaved =
+          expectedRevision === undefined
+            ? await this.repository.save(snapshot)
+            : await this.repository.save(snapshot, {
+                expectedRevision: expectedRevision.revision,
+              });
+        if (
+          expectedRevision !== undefined &&
+          this.expectedRevisions.get(snapshot.id) === expectedRevision
+        ) {
+          this.expectedRevisions.set(snapshot.id, {
+            revision: lastSaved.revision,
+          });
+        }
         this.onSaved?.(cloneProjectValue(lastSaved));
       } catch (error) {
         // Keep the failed snapshot unless a newer edit already superseded it.

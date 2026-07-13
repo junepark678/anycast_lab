@@ -15,6 +15,8 @@ export interface StoredProject<TProject extends ProjectIdentity> {
   revision: number;
   createdAt: number;
   updatedAt: number;
+  /** Most recent time the project was selected, independent of content saves. */
+  lastOpenedAt: number;
 }
 
 export interface ProjectSummary {
@@ -24,6 +26,7 @@ export interface ProjectSummary {
   revision: number;
   createdAt: number;
   updatedAt: number;
+  lastOpenedAt: number;
 }
 
 export interface SaveProjectOptions {
@@ -43,6 +46,8 @@ export interface ProjectRepository<TProject extends ProjectIdentity> {
     project: TProject,
     options?: SaveProjectOptions,
   ): Promise<StoredProject<TProject>>;
+  /** Records recency without changing the project snapshot or its revision. */
+  markOpened(id: string): Promise<StoredProject<TProject> | undefined>;
   delete(id: string): Promise<boolean>;
   clear(): Promise<void>;
   close(): void;

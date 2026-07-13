@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AutosaveCoordinator, MemoryProjectRepository } from '../persistence';
-import { replacePersistedProject, resumeProjectAutosave } from './project-replacement';
+import {
+  activatePersistedProject,
+  replacePersistedProject,
+  resumeProjectAutosave,
+} from './project-replacement';
 
 interface TestProject {
   id: string;
@@ -10,6 +14,45 @@ interface TestProject {
 afterEach(() => vi.useRealTimers());
 
 describe('replacePersistedProject', () => {
+  it('opens an existing project without rewriting it or incrementing its revision', async () => {
+    const repository = new MemoryProjectRepository<TestProject>();
+    await repository.save({ id: 'current', name: 'Current project' });
+    const target = await repository.save({ id: 'target', name: 'Saved target' });
+    const autosave = new AutosaveCoordinator({ repository, delayMs: 10_000 });
+    autosave.schedule({ id: 'current', name: 'Current project with edits' });
+    const installed = vi.fn();
+
+    await activatePersistedProject({
+      project: target.project,
+      disposeRuntime: async () => {},
+      autosave,
+      install: installed,
+    });
+
+    expect(installed).toHaveBeenCalledWith(target.project);
+    expect((await repository.get('target'))?.revision).toBe(target.revision);
+    expect((await repository.get('current'))?.project.name).toBe('Current project with edits');
+  });
+
+  it('runs durable transition work after draining autosave and before installation', async () => {
+    const repository = new MemoryProjectRepository<TestProject>();
+    const autosave = new AutosaveCoordinator({ repository, delayMs: 10_000 });
+    const order: string[] = [];
+    autosave.schedule({ id: 'current', name: 'Pending current edit' });
+
+    await activatePersistedProject({
+      project: { id: 'target', name: 'Target' },
+      disposeRuntime: async () => { order.push('dispose'); },
+      autosave,
+      beforeInstall: async () => {
+        order.push((await repository.get('current')) === undefined ? 'missing' : 'saved');
+      },
+      install: () => { order.push('install'); },
+    });
+
+    expect(order).toEqual(['dispose', 'saved', 'install']);
+  });
+
   it('drains an edit scheduled during delayed runtime disposal before installing a same-ID import', async () => {
     vi.useFakeTimers();
     const writes: TestProject[] = [];

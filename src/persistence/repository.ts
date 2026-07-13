@@ -26,6 +26,8 @@ interface DatabaseProjectRecord {
   revision: number;
   createdAt: number;
   updatedAt: number;
+  /** Optional so databases created before project catalogs remain readable. */
+  lastOpenedAt?: number;
   project: unknown;
 }
 
@@ -86,6 +88,7 @@ function toStoredProject<TProject extends ProjectIdentity>(
     revision: record.revision,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+    lastOpenedAt: readLastOpenedAt(record),
   };
 }
 
@@ -97,14 +100,26 @@ function toSummary(record: DatabaseProjectRecord): ProjectSummary {
     revision: record.revision,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+    lastOpenedAt: readLastOpenedAt(record),
   };
 }
 
 function sortSummaries(summaries: ProjectSummary[]): ProjectSummary[] {
   return summaries.sort(
     (left, right) =>
-      right.updatedAt - left.updatedAt || left.name.localeCompare(right.name),
+      right.lastOpenedAt - left.lastOpenedAt ||
+      right.updatedAt - left.updatedAt ||
+      left.name.localeCompare(right.name) ||
+      left.id.localeCompare(right.id),
   );
+}
+
+/** Legacy records predate explicit open recency, so their last save is the fallback. */
+function readLastOpenedAt(record: DatabaseProjectRecord): number {
+  return typeof record.lastOpenedAt === 'number' &&
+    Number.isFinite(record.lastOpenedAt)
+    ? record.lastOpenedAt
+    : record.updatedAt;
 }
 
 function prepareProject<TProject extends ProjectIdentity>(
@@ -161,9 +176,22 @@ export class MemoryProjectRepository<TProject extends ProjectIdentity>
       revision: actualRevision + 1,
       createdAt: existing?.createdAt ?? timestamp,
       updatedAt: timestamp,
+      lastOpenedAt:
+        existing === undefined ? timestamp : readLastOpenedAt(existing),
       project: cloneProjectValue(prepared),
     };
     this.records.set(record.id, record);
+    return toStoredProject(record, this.migrate);
+  }
+
+  async markOpened(
+    id: string,
+  ): Promise<StoredProject<TProject> | undefined> {
+    const existing = this.records.get(id);
+    if (existing === undefined) return undefined;
+
+    const record = { ...existing, lastOpenedAt: this.now() };
+    this.records.set(id, record);
     return toStoredProject(record, this.migrate);
   }
 
@@ -254,7 +282,38 @@ export class IndexedDbProjectRepository<TProject extends ProjectIdentity>
         revision: actualRevision + 1,
         createdAt: existing?.createdAt ?? timestamp,
         updatedAt: timestamp,
+        lastOpenedAt:
+          existing === undefined ? timestamp : readLastOpenedAt(existing),
         project: cloneProjectValue(prepared),
+      };
+      await transaction.store.put(record);
+      await transaction.done;
+      return toStoredProject(record, this.migrate);
+    } catch (error) {
+      try {
+        transaction.abort();
+      } catch {
+        // A failing request may already have aborted the transaction.
+      }
+      throw error;
+    }
+  }
+
+  async markOpened(
+    id: string,
+  ): Promise<StoredProject<TProject> | undefined> {
+    const transaction = this.db.transaction('projects', 'readwrite');
+
+    try {
+      const existing = await transaction.store.get(id);
+      if (existing === undefined) {
+        await transaction.done;
+        return undefined;
+      }
+
+      const record: DatabaseProjectRecord = {
+        ...existing,
+        lastOpenedAt: this.now(),
       };
       await transaction.store.put(record);
       await transaction.done;

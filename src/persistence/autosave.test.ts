@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AutosaveCoordinator } from './autosave';
-import { MemoryProjectRepository } from './repository';
+import {
+  MemoryProjectRepository,
+  ProjectRevisionConflictError,
+} from './repository';
 
 interface TestProject {
   id: string;
@@ -59,6 +62,135 @@ describe('AutosaveCoordinator', () => {
     autosave.cancel();
     await vi.runAllTimersAsync();
     expect((await repository.get('project-1'))?.project.name).toBe('flushed');
+  });
+
+  it('preserves last-writer-wins saves when no revision is seeded', async () => {
+    const repository = new MemoryProjectRepository<TestProject>();
+    const save = vi.spyOn(repository, 'save');
+    const autosave = new AutosaveCoordinator({ repository, delayMs: 10_000 });
+
+    autosave.schedule(project('without CAS'));
+    await autosave.flush();
+    autosave.schedule(project('still without CAS'));
+    await autosave.flush();
+
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[0]).toHaveLength(1);
+    expect(save.mock.calls[0]?.[0]).toMatchObject({ name: 'without CAS' });
+    expect(save.mock.calls[1]).toHaveLength(1);
+    expect(save.mock.calls[1]?.[0]).toMatchObject({
+      name: 'still without CAS',
+    });
+  });
+
+  it('uses a seeded revision and advances it after every successful save', async () => {
+    const repository = new MemoryProjectRepository<TestProject>();
+    const original = await repository.save(project('original'));
+    const save = vi.spyOn(repository, 'save');
+    const autosave = new AutosaveCoordinator({ repository, delayMs: 10_000 });
+    autosave.setExpectedRevision('project-1', original.revision);
+
+    autosave.schedule(project('first CAS edit'));
+    await expect(autosave.flush()).resolves.toMatchObject({ revision: 2 });
+    autosave.schedule(project('second CAS edit'));
+    await expect(autosave.flush()).resolves.toMatchObject({ revision: 3 });
+
+    expect(save).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ name: 'first CAS edit' }),
+      { expectedRevision: 1 },
+    );
+    expect(save).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ name: 'second CAS edit' }),
+      { expectedRevision: 2 },
+    );
+  });
+
+  it('uses revision zero to protect creation of a new project', async () => {
+    const repository = new MemoryProjectRepository<TestProject>();
+    const save = vi.spyOn(repository, 'save');
+    const autosave = new AutosaveCoordinator({ repository, delayMs: 10_000 });
+    autosave.setExpectedRevision('project-1', 0);
+
+    autosave.schedule(project('new project'));
+    await expect(autosave.flush()).resolves.toMatchObject({ revision: 1 });
+
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'new project' }),
+      { expectedRevision: 0 },
+    );
+  });
+
+  it('can clear a seeded revision to restore last-writer-wins behavior', async () => {
+    const repository = new MemoryProjectRepository<TestProject>();
+    await repository.save(project('original'));
+    const save = vi.spyOn(repository, 'save');
+    const autosave = new AutosaveCoordinator({ repository, delayMs: 10_000 });
+    autosave.setExpectedRevision('project-1', 1);
+    autosave.setExpectedRevision('project-1', undefined);
+
+    autosave.schedule(project('unconditional edit'));
+    await autosave.flush();
+
+    expect(save.mock.calls[0]).toHaveLength(1);
+    expect((await repository.get('project-1'))?.project.name).toBe(
+      'unconditional edit',
+    );
+  });
+
+  it('rejects invalid expected revisions without changing save behavior', async () => {
+    const repository = new MemoryProjectRepository<TestProject>();
+    const save = vi.spyOn(repository, 'save');
+    const autosave = new AutosaveCoordinator({ repository, delayMs: 10_000 });
+
+    expect(() => autosave.setExpectedRevision('project-1', -1)).toThrow(
+      RangeError,
+    );
+    expect(() => autosave.setExpectedRevision('project-1', 1.5)).toThrow(
+      RangeError,
+    );
+    expect(() =>
+      autosave.setExpectedRevision('project-1', Number.MAX_SAFE_INTEGER + 1),
+    ).toThrow(RangeError);
+
+    autosave.schedule(project('still unconditional'));
+    await autosave.flush();
+    expect(save.mock.calls[0]).toHaveLength(1);
+  });
+
+  it('does not overwrite a replacement revision set while a save is in flight', async () => {
+    const repository = new MemoryProjectRepository<TestProject>();
+    const originalSave = repository.save.bind(repository);
+    let releaseSave!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    const save = vi.fn(async (...args: Parameters<typeof originalSave>) => {
+      await gate;
+      return originalSave(...args);
+    });
+    repository.save = save;
+    const autosave = new AutosaveCoordinator({ repository, delayMs: 10_000 });
+    autosave.setExpectedRevision('project-1', 0);
+
+    autosave.schedule(project('in flight'));
+    const flushing = autosave.flush();
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+    autosave.setExpectedRevision('project-1', 7);
+    releaseSave();
+    await flushing;
+
+    autosave.schedule(project('uses replacement'));
+    await expect(autosave.flush()).rejects.toMatchObject({
+      expectedRevision: 7,
+      actualRevision: 1,
+    });
+    expect(save).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ name: 'uses replacement' }),
+      { expectedRevision: 7 },
+    );
   });
 
   it('persists an edit that arrives while a write is in flight', async () => {
@@ -139,6 +271,65 @@ describe('AutosaveCoordinator', () => {
     expect(autosave.getState()).toMatchObject({ status: 'saved', dirty: false, revision: 1 });
     expect(saved).toHaveBeenCalledOnce();
     expect(states).toEqual(['scheduled', 'saving', 'error', 'saving', 'saved']);
+  });
+
+  it('retains a stale cross-tab edit, reports the conflict, and recovers after reseeding', async () => {
+    const repository = new MemoryProjectRepository<TestProject>();
+    const first = await repository.save(project('first tab baseline'));
+    const saved = vi.fn();
+    const observedErrors: unknown[] = [];
+    const autosave = new AutosaveCoordinator({
+      repository,
+      delayMs: 10_000,
+      onSaved: saved,
+      onStateChange: (state) => {
+        if (state.status === 'error') observedErrors.push(state.error);
+      },
+    });
+    autosave.setExpectedRevision('project-1', first.revision);
+
+    const otherTab = await repository.save(project('other tab edit'), {
+      expectedRevision: first.revision,
+    });
+    autosave.schedule(project('pending stale edit'));
+
+    await expect(autosave.flush()).rejects.toMatchObject({
+      name: 'ProjectRevisionConflictError',
+      projectId: 'project-1',
+      expectedRevision: 1,
+      actualRevision: 2,
+    });
+    expect(autosave.getState()).toMatchObject({
+      status: 'error',
+      dirty: true,
+      projectId: 'project-1',
+      error: expect.any(ProjectRevisionConflictError),
+    });
+    expect(observedErrors).toEqual([expect.any(ProjectRevisionConflictError)]);
+    expect(saved).not.toHaveBeenCalled();
+    expect((await repository.get('project-1'))?.project.name).toBe(
+      'other tab edit',
+    );
+
+    // The failed snapshot remains pending, so retrying with the stale revision
+    // reports the same conflict instead of silently dropping the local edit.
+    await expect(autosave.flush()).rejects.toBeInstanceOf(
+      ProjectRevisionConflictError,
+    );
+    expect(observedErrors).toHaveLength(2);
+
+    autosave.setExpectedRevision('project-1', otherTab.revision);
+    await expect(autosave.flush()).resolves.toMatchObject({
+      revision: 3,
+      project: { name: 'pending stale edit' },
+    });
+    expect(autosave.getState()).toMatchObject({
+      status: 'saved',
+      dirty: false,
+      revision: 3,
+      error: undefined,
+    });
+    expect(saved).toHaveBeenCalledOnce();
   });
 
   it('lets a newer edit supersede a failed in-flight snapshot', async () => {

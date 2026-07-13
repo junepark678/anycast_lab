@@ -1,7 +1,5 @@
 import { CURRENT_SCHEMA_VERSION, type LabFile, type LabNode, type LabProject } from '../core/types';
 
-const now = new Date().toISOString();
-
 function iface(id: string, name: string, addresses: string[], gateway?: string) {
   return { id, name, addresses, gateway, state: 'up' as const, mtu: 1500 };
 }
@@ -116,10 +114,22 @@ const nodes: LabNode[] = [
   },
 ];
 
-export function createExampleProject(): LabProject {
+export interface ExampleProjectOptions {
+  id?: string;
+  now?: string;
+}
+
+export function createExampleProject(
+  options: ExampleProjectOptions = {},
+): LabProject {
+  // Compute this per invocation: keeping it at module scope made newly created
+  // demos look as old as the browser tab that created them.
+  const now = options.now ?? new Date().toISOString();
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
-    id: `anycast-demo-${crypto.randomUUID?.() ?? Date.now()}`,
+    id:
+      options.id ??
+      `anycast-demo-${crypto.randomUUID?.() ?? Date.now()}`,
     name: 'Two-PoP anycast lab', createdAt: now, updatedAt: now, seed: 678,
     nodes: structuredClone(nodes),
     links: [

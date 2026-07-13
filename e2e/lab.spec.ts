@@ -97,7 +97,7 @@ test('exports and imports a byte-preserving project archive', async ({ page }) =
   await expect(page.getByRole('status')).toContainText('Imported Two-PoP anycast lab');
 });
 
-test('a pending same-ID autosave cannot overwrite an imported archive', async ({ page }) => {
+test('a same-ID import becomes a separate project and cannot be overwritten by a pending autosave', async ({ page }) => {
   await page.goto('./');
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Export' }).click();
@@ -107,10 +107,14 @@ test('a pending same-ID autosave cannot overwrite an imported archive', async ({
 
   await page.getByRole('textbox', { name: 'Project name' }).fill('Stale pre-import edit');
   await page.locator('input[type=file]').setInputFiles(archivePath!);
-  await expect(page.getByRole('status')).toContainText('Imported Two-PoP anycast lab');
+  await expect(page.getByRole('status')).toContainText('Imported Two-PoP anycast lab copy as a separate project');
   await page.waitForTimeout(750);
   await page.reload();
-  await expect(page.getByRole('textbox', { name: 'Project name' })).toHaveValue('Two-PoP anycast lab');
+  await expect(page.getByRole('textbox', { name: 'Project name' })).toHaveValue('Two-PoP anycast lab copy');
+  await page.getByRole('button', { name: 'Manage projects' }).click();
+  const manager = page.getByRole('dialog', { name: 'Projects' });
+  await expect(manager.getByRole('button', { name: 'Two-PoP anycast lab copy, current project' })).toBeVisible();
+  await expect(manager.getByRole('button', { name: 'Open Stale pre-import edit' })).toBeVisible();
 });
 
 test('fails the Seoul path and reconverges traffic through Frankfurt', async ({ page }) => {

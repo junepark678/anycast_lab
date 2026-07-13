@@ -19,18 +19,29 @@ import {
   projectArchiveFilename,
   requestPersistentStorage,
   type ProjectRepository,
+  type ProjectSummary,
 } from './persistence';
 import { BottomPanel } from './app/components/BottomPanel';
 import { EmptyInspector, LinkInspector, NodeInspector } from './app/components/Inspector';
 import { LabHeader } from './app/components/LabHeader';
 import { Palette } from './app/components/Palette';
+import { ProjectManager, type ProjectTemplate } from './app/components/ProjectManager';
 import { TopologyCanvas } from './app/components/TopologyCanvas';
 import {
   loadNativeRuntimeAvailability,
   nativeMemoryEstimate,
   type NativeRuntimeAvailability,
 } from './app/native-runtime';
-import { replacePersistedProject, resumeProjectAutosave } from './app/project-replacement';
+import {
+  createBlankProject,
+  createDefaultDemoProject,
+  duplicateProject,
+  validateProjectName,
+} from './app/project-management';
+import {
+  activatePersistedProject,
+  resumeProjectAutosave,
+} from './app/project-replacement';
 import { projectCanvas, useLabStore } from './app/store';
 import { consumeTerminalChunk } from './app/terminal-stream';
 import type { ConfigFileView, LabLinkViewData, LabNodeViewData, TimelineEventView, TraceHopView } from './app/view-types';
@@ -52,6 +63,13 @@ interface BrowserPgoBridge {
   enabled: true;
   engine?: BrowserPgoBridgeEngine;
   profiles?: unknown;
+}
+
+interface PreparedProjectTransition {
+  project: LabProject;
+  revision: number;
+  beforeInstall?: () => Promise<void>;
+  successMessage: string;
 }
 
 type PgoBridgeGlobal = typeof globalThis & { __anycastPgo?: BrowserPgoBridge };
@@ -123,6 +141,16 @@ function saveBlob(bytes: Uint8Array, filename: string, mediaType = ANYCAST_LAB_A
   anchor.download = filename;
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function readLastProjectId(): string | null {
+  try { return localStorage.getItem(LAST_PROJECT_KEY); }
+  catch { return null; }
+}
+
+function rememberLastProjectId(projectId: string): void {
+  try { localStorage.setItem(LAST_PROJECT_KEY, projectId); }
+  catch { /* IndexedDB remains authoritative when preference storage is denied. */ }
 }
 
 function nativeEventView(event: NativeLabEvent): TimelineEventView {
@@ -217,6 +245,11 @@ export default function App() {
   const [consoleFocusRequest, setConsoleFocusRequest] = useState(0);
   const [consoleNodeId, setConsoleNodeId] = useState(() => store.project.nodes.find((node) => node.kind !== 'switch')?.id ?? '');
   const [persistenceReady, setPersistenceReady] = useState(false);
+  const [projectManagerOpen, setProjectManagerOpen] = useState(false);
+  const [projectManagerLoading, setProjectManagerLoading] = useState(false);
+  const [projectManagerError, setProjectManagerError] = useState<string | null>(null);
+  const [projectSummaries, setProjectSummaries] = useState<ProjectSummary[]>([]);
+  const [repositoryBackend, setRepositoryBackend] = useState<'indexeddb' | 'memory'>('indexeddb');
   const [nativeProjectLocked, setNativeProjectLocked] = useState(false);
   const runtimeMode = useMemo<'simulation' | 'native'>(
     () => store.project.nodes.some((node) => node.kind !== 'switch' && node.appliance.runtime === 'wasm') ? 'native' : 'simulation',
@@ -226,6 +259,21 @@ export default function App() {
     () => store.project.nodes.filter((node) => node.kind !== 'switch').length,
     [store.project.nodes],
   );
+
+  const refreshProjectSummaries = useCallback(async (): Promise<boolean> => {
+    const repository = repositoryRef.current;
+    if (repository === null) return false;
+    setProjectManagerLoading(true);
+    try {
+      setProjectSummaries(await repository.list());
+      return true;
+    } catch (error) {
+      setProjectManagerError(error instanceof Error ? error.message : 'Could not load saved projects.');
+      return false;
+    } finally {
+      setProjectManagerLoading(false);
+    }
+  }, []);
 
   const updateWorkspaceLayout = useCallback((patch: Partial<WorkspaceLayout>, persist = true) => {
     setWorkspaceLayout((current) => {
@@ -274,32 +322,68 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const repository = await createLabProjectRepository({ onFallback: () => setToast('IndexedDB unavailable; changes will last for this session.') });
-      if (cancelled) { repository.close(); return; }
-      repositoryRef.current = repository;
-      autosaveRef.current = new AutosaveCoordinator({
-        repository,
-        delayMs: 500,
-        onStateChange: (state) => {
-          if (state.status === 'saving') store.markSaving();
-          if (state.status === 'error') store.markSaveError();
-        },
-        onSaved: (saved) => useLabStore.getState().markSaved(saved.project),
-      });
-      const previousId = localStorage.getItem(LAST_PROJECT_KEY);
-      const previous = previousId ? await repository.get(previousId) : undefined;
-      const current = useLabStore.getState();
-      if (previous && !current.dirty) current.setProject(previous.project);
-      else if (!previous) await repository.save(current.project);
-      const active = useLabStore.getState();
-      localStorage.setItem(LAST_PROJECT_KEY, active.project.id);
-      bootedRef.current = true;
-      if (active.dirty) autosaveRef.current.schedule(active.project);
-      // Keep persistence actions locked until the initial lookup/restore is
-      // fully settled; otherwise a fast import can be replaced by stale
-      // bootstrap data when the lookup resumes.
-      setPersistenceReady(true);
-      void requestPersistentStorage();
+      let repository: ProjectRepository<LabProject> | null = null;
+      try {
+        repository = await createLabProjectRepository({ onFallback: () => setToast('IndexedDB unavailable; changes will last for this session.') });
+        if (cancelled) { repository.close(); return; }
+        repositoryRef.current = repository;
+        setRepositoryBackend(repository.backend);
+        autosaveRef.current = new AutosaveCoordinator({
+          repository,
+          delayMs: 500,
+          onStateChange: (state) => {
+            if (state.status === 'saving') store.markSaving();
+            if (state.status === 'error') store.markSaveError();
+          },
+          onSaved: (saved) => {
+            useLabStore.getState().markSaved(saved.project);
+            if (!cancelled) {
+              void repository!.list().then(setProjectSummaries).catch((error: unknown) => {
+                if (!cancelled) setProjectManagerError(error instanceof Error ? error.message : 'Could not refresh saved projects.');
+              });
+            }
+          },
+        });
+        const previousId = readLastProjectId();
+        const previous = previousId ? await repository.get(previousId) : undefined;
+        const current = useLabStore.getState();
+        if (previous && !current.dirty) {
+          current.setProject(previous.project);
+        } else if (!current.dirty) {
+          const recent = (await repository.list())[0];
+          const fallback = recent ? await repository.get(recent.id) : undefined;
+          if (fallback) current.setProject(fallback.project);
+        }
+        const active = useLabStore.getState();
+        let activeStored = await repository.get(active.project.id);
+        if (!active.dirty && activeStored === undefined) {
+          activeStored = await repository.save(active.project, { expectedRevision: 0 });
+        }
+        autosaveRef.current.setExpectedRevision(active.project.id, activeStored?.revision ?? 0);
+        await repository.markOpened(active.project.id);
+        rememberLastProjectId(active.project.id);
+        setProjectSummaries(await repository.list());
+      } catch (error) {
+        if (!cancelled) {
+          const message = error instanceof Error ? error.message : 'Local project storage could not be initialized.';
+          setProjectManagerError(message);
+          setToast('The default demo is open, but the saved-project catalog needs attention.');
+        }
+      } finally {
+        if (!cancelled && repositoryRef.current !== null) {
+          bootedRef.current = true;
+          // The user can edit the initially rendered demo while IndexedDB startup
+          // is still awaiting its first reads. Re-read the store after boot so an
+          // edit that the dirty-state effect intentionally skipped is not lost.
+          const latest = useLabStore.getState();
+          if (latest.dirty) autosaveRef.current?.schedule(latest.project);
+          // Keep persistence actions locked until the initial lookup/restore is
+          // fully settled; otherwise a fast import can be replaced by stale
+          // bootstrap data when the lookup resumes.
+          setPersistenceReady(true);
+          void requestPersistentStorage();
+        }
+      }
     })();
     return () => {
       cancelled = true;
@@ -319,7 +403,15 @@ export default function App() {
 
   useEffect(() => {
     const flushPendingSave = () => {
-      if (useLabStore.getState().dirty) void autosaveRef.current?.flush();
+      const active = useLabStore.getState();
+      const autosave = autosaveRef.current;
+      if (active.dirty && autosave !== null) {
+        // Startup intentionally suppresses the normal dirty-state effect until
+        // restoration settles. A pagehide during that window must enqueue the
+        // current snapshot before flushing it.
+        autosave.schedule(active.project);
+        void autosave.flush();
+      }
     };
     const flushWhenHidden = () => {
       if (document.visibilityState === 'hidden') flushPendingSave();
@@ -335,7 +427,7 @@ export default function App() {
   useEffect(() => {
     if (!bootedRef.current || !store.dirty || projectReplacementRef.current) return;
     autosaveRef.current?.schedule(store.project);
-    localStorage.setItem(LAST_PROJECT_KEY, store.project.id);
+    rememberLastProjectId(store.project.id);
   }, [store.dirty, store.project]);
 
   useEffect(() => {
@@ -696,6 +788,211 @@ export default function App() {
     await native?.dispose();
   }, []);
 
+  const performProjectTransition = useCallback(async (
+    prepare: (repository: ProjectRepository<LabProject>) => Promise<PreparedProjectTransition>,
+  ): Promise<boolean> => {
+    if (!beginRuntimeOperation()) {
+      setProjectManagerError('Wait for the current project operation to finish.');
+      return false;
+    }
+    projectReplacementRef.current = true;
+    setProjectManagerError(null);
+    let runtimeDisposalStarted = false;
+    try {
+      const repository = repositoryRef.current;
+      if (repository === null) throw new Error('Local project storage is still starting.');
+      const transition = await prepare(repository);
+      await activatePersistedProject({
+        project: transition.project,
+        disposeRuntime: async () => {
+          runtimeDisposalStarted = true;
+          await disposeRuntime();
+        },
+        autosave: autosaveRef.current,
+        install: store.setProject,
+        beforeInstall: transition.beforeInstall,
+      });
+      autosaveRef.current?.setExpectedRevision(transition.project.id, transition.revision);
+      setNativeEvents([]);
+      store.resetRuntime();
+      let metadataWarning: string | null = null;
+      try {
+        await repository.markOpened(transition.project.id);
+      } catch (error) {
+        metadataWarning = error instanceof Error ? error.message : 'Could not update project recency.';
+        setProjectManagerError(metadataWarning);
+      }
+      rememberLastProjectId(transition.project.id);
+      await refreshProjectSummaries();
+      setToast(metadataWarning === null
+        ? transition.successMessage
+        : `${transition.successMessage} Project recency could not be updated.`);
+      return true;
+    } catch (error) {
+      if (runtimeDisposalStarted) store.resetRuntime();
+      const message = error instanceof Error ? error.message : 'Could not change projects.';
+      setProjectManagerError(message);
+      setToast(message);
+      return false;
+    } finally {
+      projectReplacementRef.current = false;
+      const active = useLabStore.getState();
+      resumeProjectAutosave({
+        project: active.project,
+        dirty: active.dirty,
+        booted: bootedRef.current,
+        autosave: autosaveRef.current,
+        rememberProjectId: rememberLastProjectId,
+      });
+      finishRuntimeOperation();
+    }
+  }, [beginRuntimeOperation, disposeRuntime, finishRuntimeOperation, refreshProjectSummaries, store]);
+
+  const openSavedProject = useCallback(async (projectId: string): Promise<boolean> => (
+    performProjectTransition(async (repository) => {
+      const stored = await repository.get(projectId);
+      if (stored === undefined) throw new Error('That project no longer exists in local storage.');
+      return {
+        project: stored.project,
+        revision: stored.revision,
+        successMessage: `Opened ${stored.project.name}.`,
+      };
+    })
+  ), [performProjectTransition]);
+
+  const createManagedProject = useCallback(async (
+    template: ProjectTemplate,
+    requestedName: string,
+  ): Promise<boolean> => (
+    performProjectTransition(async (repository) => {
+      const name = validateProjectName(requestedName);
+      const project = template === 'demo'
+        ? { ...createDefaultDemoProject(), name }
+        : createBlankProject(name);
+      return {
+        project,
+        revision: 1,
+        beforeInstall: async () => { await repository.save(project, { expectedRevision: 0 }); },
+        successMessage: `Created ${project.name}.`,
+      };
+    })
+  ), [performProjectTransition]);
+
+  const duplicateManagedProject = useCallback(async (projectId: string): Promise<boolean> => (
+    performProjectTransition(async (repository) => {
+      const source = projectId === useLabStore.getState().project.id
+        ? useLabStore.getState().project
+        : (await repository.get(projectId))?.project;
+      if (source === undefined) throw new Error('That project no longer exists in local storage.');
+      const summaries = await repository.list();
+      const project = duplicateProject(source, summaries);
+      return {
+        project,
+        revision: 1,
+        beforeInstall: async () => { await repository.save(project, { expectedRevision: 0 }); },
+        successMessage: `Created ${project.name}.`,
+      };
+    })
+  ), [performProjectTransition]);
+
+  const renameManagedProject = useCallback(async (projectId: string, requestedName: string): Promise<boolean> => {
+    setProjectManagerError(null);
+    try {
+      const repository = repositoryRef.current;
+      if (repository === null) throw new Error('Local project storage is still starting.');
+      const name = validateProjectName(requestedName);
+      const active = useLabStore.getState();
+      if (projectId === active.project.id) {
+        projectReplacementRef.current = true;
+        try {
+          active.renameProject(name);
+          const updated = useLabStore.getState().project;
+          autosaveRef.current?.schedule(updated);
+          await autosaveRef.current?.flush();
+        } finally {
+          // The manual flush above owns this mutation. Suppressing the normal
+          // dirty effect prevents an identical second revision from being
+          // enqueued while the IndexedDB transaction is in flight.
+          projectReplacementRef.current = false;
+        }
+      } else {
+        const stored = await repository.get(projectId);
+        if (stored === undefined) throw new Error('That project no longer exists in local storage.');
+        const previousTimestamp = Date.parse(stored.project.updatedAt);
+        const timestamp = Number.isFinite(previousTimestamp)
+          ? Math.max(Date.now(), previousTimestamp + 1)
+          : Date.now();
+        await repository.save({
+          ...stored.project,
+          name,
+          updatedAt: new Date(timestamp).toISOString(),
+        }, { expectedRevision: stored.revision });
+      }
+      await refreshProjectSummaries();
+      setToast(`Renamed project to ${name}.`);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not rename that project.';
+      setProjectManagerError(message);
+      return false;
+    }
+  }, [refreshProjectSummaries]);
+
+  const exportManagedProject = useCallback(async (projectId: string): Promise<boolean> => {
+    setProjectManagerError(null);
+    try {
+      const repository = repositoryRef.current;
+      if (repository === null) throw new Error('Local project storage is still starting.');
+      const project = projectId === useLabStore.getState().project.id
+        ? useLabStore.getState().project
+        : (await repository.get(projectId))?.project;
+      if (project === undefined) throw new Error('That project no longer exists in local storage.');
+      saveBlob(exportProjectArchive(project), projectArchiveFilename(project.name));
+      setToast(`Exported ${project.name}.`);
+      return true;
+    } catch (error) {
+      setProjectManagerError(error instanceof Error ? error.message : 'Could not export that project.');
+      return false;
+    }
+  }, []);
+
+  const deleteManagedProject = useCallback(async (projectId: string): Promise<boolean> => {
+    const activeId = useLabStore.getState().project.id;
+    if (projectId !== activeId) {
+      setProjectManagerError(null);
+      try {
+        const repository = repositoryRef.current;
+        if (repository === null) throw new Error('Local project storage is still starting.');
+        if (!await repository.delete(projectId)) throw new Error('That project no longer exists in local storage.');
+        await refreshProjectSummaries();
+        setToast('Project deleted.');
+        return true;
+      } catch (error) {
+        setProjectManagerError(error instanceof Error ? error.message : 'Could not delete that project.');
+        return false;
+      }
+    }
+
+    return performProjectTransition(async (repository) => {
+      const remaining = (await repository.list()).filter((summary) => summary.id !== projectId);
+      const storedReplacement = remaining[0] ? await repository.get(remaining[0].id) : undefined;
+      const replacement = storedReplacement?.project ?? createBlankProject();
+      return {
+        project: replacement,
+        revision: storedReplacement?.revision ?? 1,
+        beforeInstall: async () => {
+          if (storedReplacement === undefined) {
+            await repository.save(replacement, { expectedRevision: 0 });
+          }
+          if (!await repository.delete(projectId)) {
+            throw new Error('That project no longer exists in local storage.');
+          }
+        },
+        successMessage: `Deleted the project and opened ${replacement.name}.`,
+      };
+    });
+  }, [performProjectTransition, refreshProjectSummaries]);
+
   const resetRuntime = useCallback(async (): Promise<void> => {
     if (!beginRuntimeOperation()) return;
     try {
@@ -755,42 +1052,31 @@ export default function App() {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file) return;
-    if (!beginRuntimeOperation()) {
-      setToast('Wait for the current runtime operation to finish before importing.');
-      return;
-    }
-    projectReplacementRef.current = true;
     try {
       const imported = await importProjectArchive<LabProject>(file);
       const validation = validateProject(imported.project);
       if (!validation.success || !validation.value) throw new Error(validation.issues.map((issue) => `${issue.path}: ${issue.message}`).join('\n'));
-      const repository = repositoryRef.current;
-      if (repository === null) throw new Error('Local project storage is still starting. Try the import again in a moment.');
-      await replacePersistedProject({
-        project: validation.value,
-        disposeRuntime,
-        autosave: autosaveRef.current,
-        repository,
-        install: store.setProject,
+      validateProjectName(validation.value.name);
+      await performProjectTransition(async (repository) => {
+        const collision = await repository.get(validation.value!.id);
+        const project = collision === undefined
+          ? validation.value!
+          : duplicateProject(validation.value!, await repository.list());
+        return {
+          project,
+          revision: 1,
+          beforeInstall: async () => { await repository.save(project, { expectedRevision: 0 }); },
+          successMessage: collision === undefined
+            ? `Imported ${project.name}.`
+            : `Imported ${project.name} as a separate project; the existing project was kept.`,
+        };
       });
-      setNativeEvents([]);
-      store.resetRuntime();
-      localStorage.setItem(LAST_PROJECT_KEY, validation.value.id);
-      setToast(`Imported ${validation.value.name}.`);
-    } catch (error) { setToast(error instanceof Error ? error.message : 'Could not import project.'); }
-    finally {
-      projectReplacementRef.current = false;
-      const active = useLabStore.getState();
-      resumeProjectAutosave({
-        project: active.project,
-        dirty: active.dirty,
-        booted: bootedRef.current,
-        autosave: autosaveRef.current,
-        rememberProjectId: (projectId) => localStorage.setItem(LAST_PROJECT_KEY, projectId),
-      });
-      finishRuntimeOperation();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not import project.';
+      setProjectManagerError(message);
+      setToast(message);
     }
-  }, [beginRuntimeOperation, disposeRuntime, finishRuntimeOperation, store]);
+  }, [performProjectTransition]);
 
   const saveNow = useCallback(async () => {
     try { autosaveRef.current?.schedule(store.project); await autosaveRef.current?.flush(); setToast('Project saved locally.'); }
@@ -833,9 +1119,11 @@ export default function App() {
   }, [store, updateWorkspaceLayout]);
 
   return (
+    <>
     <div
       className={`lab-shell${editorNode ? ' is-editor-open' : ''}${context.embedded ? ' is-embedded' : ''}${workspaceLayout.headerCollapsed ? ' is-header-collapsed' : ''}`}
       data-guide-focus={guideFocusTarget ?? undefined}
+      inert={projectManagerOpen ? true : undefined}
     >
       <LabHeader
         projectName={store.project.name}
@@ -852,6 +1140,11 @@ export default function App() {
         collapsed={workspaceLayout.headerCollapsed}
         embedded={context.embedded}
         onProjectNameChange={store.renameProject}
+        onManageProjects={() => {
+          setProjectManagerError(null);
+          setProjectManagerOpen(true);
+          void refreshProjectSummaries();
+        }}
         onRuntimeModeChange={(mode) => void changeRuntimeMode(mode)}
         onRunToggle={() => void run()}
         onReset={() => void resetRuntime()}
@@ -966,5 +1259,24 @@ export default function App() {
       />
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>
+    <ProjectManager
+      open={projectManagerOpen}
+      onClose={() => setProjectManagerOpen(false)}
+      projects={projectSummaries}
+      activeProjectId={store.project.id}
+      backend={repositoryBackend}
+      busy={runtimeBusy}
+      loading={projectManagerLoading}
+      error={projectManagerError}
+      clearError={() => setProjectManagerError(null)}
+      onOpen={openSavedProject}
+      onCreate={createManagedProject}
+      onRename={renameManagedProject}
+      onDuplicate={duplicateManagedProject}
+      onDelete={deleteManagedProject}
+      onExport={exportManagedProject}
+      onImportClick={() => fileInputRef.current?.click()}
+    />
+    </>
   );
 }

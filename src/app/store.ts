@@ -165,10 +165,12 @@ function availableInterface(node: LabNode, links: LabLink[]): { node: LabNode; i
   return { node: { ...node, interfaces: [...node.interfaces, created] }, interfaceId: created.id };
 }
 
+const initialProject = createExampleProject();
+
 export const useLabStore = create<LabStore>((set, get) => ({
-  project: createExampleProject(), running: false, dirty: false, saveState: 'saved', selection: null,
+  project: initialProject, running: false, dirty: false, saveState: 'saved', selection: null,
   editorNodeId: null, editorPath: null, diagnostics: [], snapshot: null, trace: null,
-  terminalLinesByNode: applianceTerminalLines(createExampleProject(), 'Appliance console ready. Try “show protocols”, “show route”, or “ip addr”.'),
+  terminalLinesByNode: applianceTerminalLines(initialProject, 'Appliance console ready. Try “show protocols”, “show route”, or “ip addr”.'),
   setProject: (project) => set({
     project,
     dirty: false,

@@ -1,5 +1,6 @@
 import {
   Download,
+  FolderKanban,
   FolderOpen,
   Pause,
   PanelTopClose,
@@ -9,7 +10,8 @@ import {
   Save,
   ShieldCheck,
 } from 'lucide-react';
-import type { ChangeEvent, RefObject } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent, type RefObject } from 'react';
+import { MAX_PROJECT_NAME_LENGTH, validateProjectName } from '../project-management';
 
 interface Props {
   projectName: string;
@@ -24,6 +26,7 @@ interface Props {
   nativeRuntimeDetail: string;
   fileInputRef: RefObject<HTMLInputElement | null>;
   onProjectNameChange: (name: string) => void;
+  onManageProjects: () => void;
   onRuntimeModeChange: (mode: 'simulation' | 'native') => void;
   onRunToggle: () => void;
   onReset: () => void;
@@ -37,6 +40,22 @@ interface Props {
 
 export function LabHeader(props: Props) {
   const collapsed = props.collapsed ?? false;
+  const [projectNameDraft, setProjectNameDraft] = useState(props.projectName);
+  const skipNameBlurRef = useRef(false);
+  const nameAtFocusRef = useRef(props.projectName);
+
+  useEffect(() => { setProjectNameDraft(props.projectName); }, [props.projectName]);
+
+  const commitProjectName = () => {
+    const next = projectNameDraft.trim();
+    if (next.length === 0) {
+      setProjectNameDraft(props.projectName);
+      return;
+    }
+    setProjectNameDraft(next);
+    if (next !== props.projectName) props.onProjectNameChange(next);
+  };
+
   return (
     <header className={`lab-header${collapsed ? ' is-toolbar-collapsed' : ''}`}>
       <a
@@ -52,10 +71,56 @@ export function LabHeader(props: Props) {
       <div className="project-name">
         <input
           aria-label="Project name"
-          value={props.projectName}
+          value={projectNameDraft}
+          maxLength={MAX_PROJECT_NAME_LENGTH}
           disabled={props.projectMutationLocked}
-          onChange={(event) => props.onProjectNameChange(event.target.value)}
+          onFocus={() => { nameAtFocusRef.current = props.projectName; }}
+          onChange={(event) => {
+            const next = event.target.value;
+            setProjectNameDraft(next);
+            try {
+              const validName = validateProjectName(next);
+              // Keep leading/trailing whitespace as a local editing draft and
+              // only autosave a display-ready value.
+              if (validName === next && validName !== props.projectName) {
+                props.onProjectNameChange(validName);
+              }
+            } catch {
+              // Blank/invalid transient drafts never reach durable state.
+            }
+          }}
+          onBlur={() => {
+            if (skipNameBlurRef.current) {
+              skipNameBlurRef.current = false;
+              return;
+            }
+            commitProjectName();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              skipNameBlurRef.current = true;
+              commitProjectName();
+              event.currentTarget.blur();
+            }
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              skipNameBlurRef.current = true;
+              const previousName = nameAtFocusRef.current;
+              setProjectNameDraft(previousName);
+              if (previousName !== projectNameDraft) props.onProjectNameChange(previousName);
+              event.currentTarget.blur();
+            }
+          }}
         />
+        <button
+          type="button"
+          className="icon-button project-manager-trigger"
+          aria-label="Manage projects"
+          title={props.persistenceReady ? 'Manage projects' : 'Preparing local storage…'}
+          disabled={!props.persistenceReady || props.runtimeBusy}
+          onClick={props.onManageProjects}
+        ><FolderKanban size={16} /></button>
         <span className={`save-state save-state--${props.saveState}`}>
           {props.saveState === 'saving' ? 'Saving…' : props.saveState === 'error' ? 'Save failed' : props.dirty ? 'Unsaved' : 'Saved locally'}
         </span>
