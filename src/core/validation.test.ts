@@ -22,4 +22,45 @@ describe('project validation', () => {
     expect(result.issues.map((item) => item.code)).toEqual(expect.arrayContaining(['node.id-duplicate', 'interface.address-invalid', 'link.latency', 'link.node-missing', 'link.interface-reused']));
     expect(() => assertValidProject(project)).toThrow(/invalid/i);
   });
+
+  it.each(['/etc/../tmp/config', '/etc//bird.conf', '/usr/local/config'])(
+    'rejects appliance paths unsupported by the native runtime: %s',
+    (path) => {
+      const project = createExampleProject();
+      const nodeIndex = project.nodes.findIndex((node) => node.files.length > 0);
+      const node = project.nodes[nodeIndex]!;
+      node.appliance.runtime = 'wasm';
+      node.files[0]!.path = path;
+      node.appliance.entrypoint = path;
+
+      const result = validateProject(project);
+
+      expect(result.success).toBe(false);
+      expect(result.issues).toContainEqual(
+        expect.objectContaining({ path: `nodes[${nodeIndex}].files[0].path`, code: 'file.path' }),
+      );
+    },
+  );
+
+  it('allows normalized paths outside native writable roots for compatibility appliances', () => {
+    const project = createExampleProject();
+    const node = project.nodes.find((candidate) => candidate.files.length > 0)!;
+    node.appliance.runtime = 'compatibility';
+    node.files[0]!.path = '/usr/local/config';
+    node.appliance.entrypoint = '/usr/local/config';
+
+    expect(validateProject(project)).toMatchObject({ success: true, issues: [] });
+  });
+
+  it('rejects non-finite link loss', () => {
+    const project = createExampleProject();
+    project.links[0]!.loss = Number.NaN;
+
+    const result = validateProject(project);
+
+    expect(result.success).toBe(false);
+    expect(result.issues).toContainEqual(
+      expect.objectContaining({ path: 'links[0].loss', code: 'link.loss' }),
+    );
+  });
 });

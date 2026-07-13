@@ -114,6 +114,14 @@ export class AutosaveCoordinator<TProject extends ProjectIdentity> {
       error: undefined,
     });
 
+    if (this.delayMs === 0) {
+      void this.flush().catch(() => {
+        // The error is observable through state/onStateChange. Avoid an
+        // unhandled rejection for automatically started saves.
+      });
+      return;
+    }
+
     this.timer = this.setTimer(() => {
       this.timer = undefined;
       void this.flush().catch(() => {

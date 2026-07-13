@@ -325,6 +325,8 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
+    let revisionSeeded = false;
+    let unsubscribeAutosave: (() => void) | undefined;
     void (async () => {
       let repository: ProjectRepository<LabProject> | null = null;
       try {
@@ -334,7 +336,7 @@ export default function App() {
         setRepositoryBackend(repository.backend);
         autosaveRef.current = new AutosaveCoordinator({
           repository,
-          delayMs: 500,
+          delayMs: 0,
           onStateChange: (state) => {
             if (state.status === 'saving') store.markSaving();
             if (state.status === 'error') store.markSaveError();
@@ -348,6 +350,20 @@ export default function App() {
             }
           },
         });
+        unsubscribeAutosave = useLabStore.subscribe((current, previous) => {
+          if (
+            !bootedRef.current ||
+            !current.dirty ||
+            current.project === previous.project ||
+            projectReplacementRef.current
+          ) return;
+          const autosave = autosaveRef.current;
+          if (autosave === null) return;
+          // Start the IndexedDB transaction in the same call stack as the edit.
+          // A page lifecycle event cannot reliably await an asynchronous flush.
+          autosave.schedule(current.project);
+          rememberLastProjectId(current.project.id);
+        });
         const previousId = readLastProjectId();
         const previous = previousId ? await repository.get(previousId) : undefined;
         const current = useLabStore.getState();
@@ -356,7 +372,8 @@ export default function App() {
         } else if (!current.dirty) {
           const recent = (await repository.list())[0];
           const fallback = recent ? await repository.get(recent.id) : undefined;
-          if (fallback) current.setProject(fallback.project);
+          const latest = useLabStore.getState();
+          if (fallback && !latest.dirty) latest.setProject(fallback.project);
         }
         const active = useLabStore.getState();
         let activeStored = await repository.get(active.project.id);
@@ -364,6 +381,7 @@ export default function App() {
           activeStored = await repository.save(active.project, { expectedRevision: 0 });
         }
         autosaveRef.current.setExpectedRevision(active.project.id, activeStored?.revision ?? 0);
+        revisionSeeded = true;
         await repository.markOpened(active.project.id);
         rememberLastProjectId(active.project.id);
         setProjectSummaries(await repository.list());
@@ -374,13 +392,19 @@ export default function App() {
           setToast('The default demo is open, but the saved-project catalog needs attention.');
         }
       } finally {
-        if (!cancelled && repositoryRef.current !== null) {
+        if (!cancelled && repositoryRef.current !== null && revisionSeeded) {
           bootedRef.current = true;
           // The user can edit the initially rendered demo while IndexedDB startup
           // is still awaiting its first reads. Re-read the store after boot so an
           // edit that the dirty-state effect intentionally skipped is not lost.
           const latest = useLabStore.getState();
-          if (latest.dirty) autosaveRef.current?.schedule(latest.project);
+          resumeProjectAutosave({
+            project: latest.project,
+            dirty: latest.dirty,
+            booted: bootedRef.current,
+            autosave: autosaveRef.current,
+            rememberProjectId: rememberLastProjectId,
+          });
           // Keep persistence actions locked until the initial lookup/restore is
           // fully settled; otherwise a fast import can be replaced by stale
           // bootstrap data when the lookup resumes.
@@ -391,6 +415,7 @@ export default function App() {
     })();
     return () => {
       cancelled = true;
+      unsubscribeAutosave?.();
       const autosave = autosaveRef.current;
       const repository = repositoryRef.current;
       if (autosave !== null) void autosave.dispose({ flush: true }).finally(() => repository?.close());
@@ -404,35 +429,6 @@ export default function App() {
     // Store methods are stable; this intentionally runs once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    const flushPendingSave = () => {
-      const active = useLabStore.getState();
-      const autosave = autosaveRef.current;
-      if (active.dirty && autosave !== null) {
-        // Startup intentionally suppresses the normal dirty-state effect until
-        // restoration settles. A pagehide during that window must enqueue the
-        // current snapshot before flushing it.
-        autosave.schedule(active.project);
-        void autosave.flush();
-      }
-    };
-    const flushWhenHidden = () => {
-      if (document.visibilityState === 'hidden') flushPendingSave();
-    };
-    window.addEventListener('pagehide', flushPendingSave);
-    document.addEventListener('visibilitychange', flushWhenHidden);
-    return () => {
-      window.removeEventListener('pagehide', flushPendingSave);
-      document.removeEventListener('visibilitychange', flushWhenHidden);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!bootedRef.current || !store.dirty || projectReplacementRef.current) return;
-    autosaveRef.current?.schedule(store.project);
-    rememberLastProjectId(store.project.id);
-  }, [store.dirty, store.project]);
 
   useEffect(() => {
     if (!toast) return;

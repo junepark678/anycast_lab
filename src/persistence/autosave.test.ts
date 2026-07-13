@@ -64,6 +64,18 @@ describe('AutosaveCoordinator', () => {
     expect((await repository.get('project-1'))?.project.name).toBe('flushed');
   });
 
+  it('starts zero-delay saves synchronously without a lifecycle flush', async () => {
+    const repository = new MemoryProjectRepository<TestProject>();
+    const save = vi.spyOn(repository, 'save');
+    const autosave = new AutosaveCoordinator({ repository, delayMs: 0 });
+
+    autosave.schedule(project('started during edit'));
+
+    expect(save).toHaveBeenCalledOnce();
+    await autosave.flush();
+    expect((await repository.get('project-1'))?.project.name).toBe('started during edit');
+  });
+
   it('preserves last-writer-wins saves when no revision is seeded', async () => {
     const repository = new MemoryProjectRepository<TestProject>();
     const save = vi.spyOn(repository, 'save');

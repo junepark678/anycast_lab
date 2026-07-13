@@ -24,6 +24,19 @@ function issue(
 
 const NODE_KINDS = new Set(['router', 'route-server', 'client', 'service', 'switch']);
 const APPLIANCE_KINDS = new Set<ApplianceKind>(['bird', 'frr', 'client', 'service', 'switch']);
+const WRITABLE_APPLIANCE_ROOTS = ['/etc', '/home', '/root', '/run', '/tmp', '/var'];
+
+function isNormalizedAppliancePath(path: string): boolean {
+  if (path === '/' || !path.startsWith('/') || path.endsWith('/') || new TextEncoder().encode(path).length >= 4096) {
+    return false;
+  }
+  return !path.split('/').slice(1).some((component) => component === '' || component === '.' || component === '..');
+}
+
+function isWritableAppliancePath(path: string): boolean {
+  if (!isNormalizedAppliancePath(path)) return false;
+  return WRITABLE_APPLIANCE_ROOTS.some((root) => path === root || path.startsWith(`${root}/`));
+}
 
 function validateNodeShape(node: unknown, index: number, issues: ValidationIssue[]): node is LabNode {
   const path = `nodes[${index}]`;
@@ -137,18 +150,30 @@ function validateNodeShape(node: unknown, index: number, issues: ValidationIssue
   } else {
     const paths = new Set<string>();
     let entrypoints = 0;
+    const nativeRuntime = isRecord(node.appliance) && node.appliance.runtime === 'wasm';
     node.files.forEach((candidate, fileIndex) => {
       const filePath = `${path}.files[${fileIndex}]`;
       if (!isRecord(candidate)) {
         issue(issues, filePath, 'file.type', 'File must be an object.');
         return;
       }
-      if (typeof candidate.path !== 'string' || !candidate.path.startsWith('/')) {
-        issue(issues, `${filePath}.path`, 'file.path', 'Appliance file paths must be absolute.');
-      } else if (paths.has(candidate.path)) {
+      const candidatePath = typeof candidate.path === 'string' ? candidate.path : undefined;
+      const validPath = candidatePath !== undefined && (
+        nativeRuntime ? isWritableAppliancePath(candidatePath) : isNormalizedAppliancePath(candidatePath)
+      );
+      if (!validPath) {
+        issue(
+          issues,
+          `${filePath}.path`,
+          'file.path',
+          nativeRuntime
+            ? 'Native appliance file paths must be normalized absolute paths under /etc, /home, /root, /run, /tmp, or /var.'
+            : 'Appliance file paths must be normalized and absolute.',
+        );
+      } else if (paths.has(candidatePath)) {
         issue(issues, `${filePath}.path`, 'file.path-duplicate', 'File paths must be unique per appliance.');
       } else {
-        paths.add(candidate.path);
+        paths.add(candidatePath);
       }
       if (typeof candidate.content !== 'string') {
         issue(issues, `${filePath}.content`, 'file.content', 'File content must be text.');
@@ -258,7 +283,7 @@ export function validateProject(value: unknown): ValidationResult<LabProject> {
     }
     if (
       candidate.loss !== undefined &&
-      (typeof candidate.loss !== 'number' || candidate.loss < 0 || candidate.loss > 1)
+      (typeof candidate.loss !== 'number' || !Number.isFinite(candidate.loss) || candidate.loss < 0 || candidate.loss > 1)
     ) {
       issue(issues, `${path}.loss`, 'link.loss', 'Loss must be between 0 and 1.');
     }

@@ -133,4 +133,37 @@ describe('replacePersistedProject', () => {
     expect((await repository.get('same-id'))?.project.name).toBe(lateMutation.name);
     expect(rememberProjectId).toHaveBeenCalledWith('same-id');
   });
+
+  it('holds bootstrap edits until restoration is complete, then saves the latest snapshot', async () => {
+    const repository = new MemoryProjectRepository<TestProject>();
+    await repository.save({ id: 'same-id', name: 'Persisted project' });
+    const save = vi.spyOn(repository, 'save');
+    const autosave = new AutosaveCoordinator({ repository, delayMs: 0 });
+    const rememberProjectId = vi.fn();
+
+    expect(resumeProjectAutosave({
+      project: { id: 'same-id', name: 'Edit during bootstrap' },
+      dirty: true,
+      booted: false,
+      autosave,
+      rememberProjectId,
+    })).toBe(false);
+    expect(save).not.toHaveBeenCalled();
+
+    autosave.setExpectedRevision('same-id', 1);
+    expect(resumeProjectAutosave({
+      project: { id: 'same-id', name: 'Latest edit after restoration' },
+      dirty: true,
+      booted: true,
+      autosave,
+      rememberProjectId,
+    })).toBe(true);
+    await autosave.flush();
+
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Latest edit after restoration' }),
+      { expectedRevision: 1 },
+    );
+    expect((await repository.get('same-id'))?.project.name).toBe('Latest edit after restoration');
+  });
 });
