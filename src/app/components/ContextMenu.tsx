@@ -6,6 +6,7 @@ import {
   useState,
   type KeyboardEvent,
   type ReactNode,
+  type RefObject,
 } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -32,6 +33,8 @@ interface Props {
   entries: ContextMenuEntry[];
   position: { x: number; y: number };
   onClose: () => void;
+  anchorRef?: RefObject<HTMLElement | null>;
+  onKeyDown?: (event: KeyboardEvent<HTMLDivElement>) => void;
 }
 
 const VIEWPORT_MARGIN = 8;
@@ -45,19 +48,19 @@ function isAction(entry: ContextMenuEntry): entry is ContextMenuAction {
  * It intentionally owns dismissal, viewport clamping, and roving focus so
  * callers only need to describe actions and their anchor point.
  */
-export function ContextMenu({ ariaLabel, entries, position, onClose }: Props) {
+export function ContextMenu({ ariaLabel, entries, position, onClose, anchorRef, onKeyDown }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(
-    typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
+    anchorRef?.current ?? (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
       ? document.activeElement
-      : null,
+      : null),
   );
   const [placedAt, setPlacedAt] = useState(position);
 
   const close = useCallback((restoreFocus = false) => {
     const returnTarget = restoreFocus ? returnFocusRef.current : null;
+    if (returnTarget) returnTarget.focus();
     onClose();
-    if (returnTarget) queueMicrotask(() => returnTarget.focus());
   }, [onClose]);
 
   useLayoutEffect(() => {
@@ -75,7 +78,8 @@ export function ContextMenu({ ariaLabel, entries, position, onClose }: Props) {
 
   useEffect(() => {
     const dismissFromOutside = (event: PointerEvent) => {
-      if (!menuRef.current?.contains(event.target as Node)) close();
+      const target = event.target as Node;
+      if (!menuRef.current?.contains(target) && !anchorRef?.current?.contains(target)) close();
     };
     const dismissFromViewportChange = (event: Event) => {
       if (event.type === 'scroll' && event.target instanceof Node && menuRef.current?.contains(event.target)) return;
@@ -94,13 +98,15 @@ export function ContextMenu({ ariaLabel, entries, position, onClose }: Props) {
       window.removeEventListener('resize', dismissFromViewportChange);
       window.removeEventListener('scroll', dismissFromOutsideScroll, true);
     };
-  }, [close]);
+  }, [anchorRef, close]);
 
   const enabledItems = () => Array.from(
     menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? [],
   );
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    onKeyDown?.(event);
+    if (event.defaultPrevented) return;
     const items = enabledItems();
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -152,11 +158,11 @@ export function ContextMenu({ ariaLabel, entries, position, onClose }: Props) {
             key={entry.id}
             onClick={() => {
               if (entry.disabled) return;
-              close();
+              close(true);
               entry.onSelect();
             }}
           >
-            {entry.icon && <span className="context-menu__icon" aria-hidden="true">{entry.icon}</span>}
+            <span className="context-menu__icon" aria-hidden="true">{entry.icon}</span>
             <span className="context-menu__label">{entry.label}</span>
             {entry.shortcut && <kbd className="context-menu__shortcut" aria-hidden="true">{entry.shortcut}</kbd>}
           </button>

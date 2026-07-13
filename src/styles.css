@@ -65,9 +65,16 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
 .brand em { margin-left: 3px; color: var(--teal); font-size: 13px; font-style: normal; font-weight: 600; }
 .brand__guide-badge { padding: 1px 5px; border: 1px solid #3d765f; border-radius: 8px; color: var(--teal-strong); font-family: var(--font-mono); font-size: 8px; font-style: normal; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 
+.lab-menu-bar { display: flex; flex: 0 0 auto; align-items: center; }
+.lab-menu-bar__desktop { display: flex; align-items: center; gap: 1px; }
+.lab-menu-bar__trigger { height: 27px; padding: 0 6px; border-radius: 4px; outline: none; background: transparent; color: #b7bbc4; cursor: pointer; font-size: 11px; font-weight: 500; }
+.lab-menu-bar__trigger:hover, .lab-menu-bar__trigger:focus-visible, .lab-menu-bar__trigger.is-active { background: #252931; color: var(--text); }
+.lab-menu-bar__trigger--compact { display: none; }
+
 .project-name { display: flex; flex: 1 1 auto; align-items: center; gap: 9px; min-width: 0; }
 .project-name input { width: min(26vw, 300px); padding: 5px 8px; border: 1px solid transparent; border-radius: 5px; background: transparent; font-weight: 600; }
 .project-name input:hover, .project-name input:focus { outline: none; border-color: var(--line-strong); background: var(--panel-raised); }
+.project-manager-trigger { flex: 0 0 31px; }
 .save-state { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .save-state--error { color: var(--rose); }
 
@@ -381,6 +388,11 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
     width: min(620px, calc(100% - 64px));
     box-shadow: -18px 0 44px rgba(0,0,0,.48);
   }
+}
+
+@media (max-width: 1150px) {
+  .lab-menu-bar__desktop { display: none; }
+  .lab-menu-bar__trigger--compact { display: block; padding-inline: 6px; font-size: 10px; }
 }
 
 @media (max-width: 700px) {

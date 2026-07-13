@@ -1,17 +1,27 @@
 import {
+  BookOpen,
+  Check,
   Download,
+  ExternalLink,
   FolderKanban,
   FolderOpen,
   Pause,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   PanelTopClose,
   PanelTopOpen,
+  Pencil,
   Play,
   RotateCcw,
   Save,
   ShieldCheck,
+  Trash2,
 } from 'lucide-react';
 import { useEffect, useRef, useState, type ChangeEvent, type RefObject } from 'react';
 import { MAX_PROJECT_NAME_LENGTH, validateProjectName } from '../project-management';
+import { LabMenuBar, type LabMenuDefinition } from './LabMenuBar';
 
 interface Props {
   projectName: string;
@@ -33,6 +43,13 @@ interface Props {
   onSave: () => void;
   onExport: () => void;
   onImport: (event: ChangeEvent<HTMLInputElement>) => void;
+  selectionType: 'node' | 'link' | null;
+  paletteCollapsed: boolean;
+  detailsCollapsed: boolean;
+  onDeleteSelection: () => void;
+  onTogglePalette: () => void;
+  onToggleDetails: () => void;
+  onResetWorkspace: () => void;
   collapsed?: boolean;
   embedded?: boolean;
   onToggleCollapsed?: () => void;
@@ -43,6 +60,7 @@ export function LabHeader(props: Props) {
   const [projectNameDraft, setProjectNameDraft] = useState(props.projectName);
   const skipNameBlurRef = useRef(false);
   const nameAtFocusRef = useRef(props.projectName);
+  const projectNameInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { setProjectNameDraft(props.projectName); }, [props.projectName]);
 
@@ -56,6 +74,155 @@ export function LabHeader(props: Props) {
     if (next !== props.projectName) props.onProjectNameChange(next);
   };
 
+  const menus: LabMenuDefinition[] = [
+    {
+      id: 'file',
+      label: 'File',
+      entries: [
+        {
+          id: 'manage-projects',
+          label: 'Manage projects…',
+          icon: <FolderKanban size={15} />,
+          disabled: !props.persistenceReady || props.runtimeBusy,
+          onSelect: props.onManageProjects,
+        },
+        {
+          id: 'save',
+          label: 'Save now',
+          icon: <Save size={15} />,
+          shortcut: 'Ctrl+S',
+          disabled: !props.persistenceReady || props.runtimeBusy,
+          onSelect: props.onSave,
+        },
+        { type: 'separator', id: 'file-transfer-separator' },
+        {
+          id: 'import',
+          label: 'Import project…',
+          icon: <FolderOpen size={15} />,
+          shortcut: 'Ctrl+O',
+          disabled: !props.persistenceReady || props.runtimeBusy,
+          onSelect: () => props.fileInputRef.current?.click(),
+        },
+        {
+          id: 'export',
+          label: 'Export project…',
+          icon: <Download size={15} />,
+          disabled: props.runtimeBusy,
+          onSelect: props.onExport,
+        },
+      ],
+    },
+    {
+      id: 'edit',
+      label: 'Edit',
+      entries: [
+        {
+          id: 'rename-project',
+          label: 'Rename project',
+          icon: <Pencil size={15} />,
+          disabled: props.projectMutationLocked,
+          onSelect: () => {
+            projectNameInputRef.current?.focus();
+            projectNameInputRef.current?.select();
+          },
+        },
+        {
+          id: 'delete-selection',
+          label: props.selectionType ? `Delete selected ${props.selectionType}` : 'Delete selection',
+          icon: <Trash2 size={15} />,
+          shortcut: 'Delete',
+          disabled: props.selectionType === null || props.projectMutationLocked,
+          tone: 'danger',
+          onSelect: props.onDeleteSelection,
+        },
+      ],
+    },
+    {
+      id: 'view',
+      label: 'View',
+      entries: [
+        {
+          id: 'toggle-palette',
+          label: props.paletteCollapsed ? 'Show appliance palette' : 'Hide appliance palette',
+          icon: props.paletteCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />,
+          onSelect: props.onTogglePalette,
+        },
+        {
+          id: 'toggle-details',
+          label: props.detailsCollapsed ? 'Show details panel' : 'Hide details panel',
+          icon: props.detailsCollapsed ? <PanelRightOpen size={15} /> : <PanelRightClose size={15} />,
+          onSelect: props.onToggleDetails,
+        },
+        {
+          id: 'toggle-toolbar',
+          label: collapsed ? 'Show workspace toolbar' : 'Hide workspace toolbar',
+          icon: collapsed ? <PanelTopOpen size={15} /> : <PanelTopClose size={15} />,
+          onSelect: () => props.onToggleCollapsed?.(),
+        },
+        { type: 'separator', id: 'view-reset-separator' },
+        {
+          id: 'reset-workspace',
+          label: 'Reset workspace layout',
+          icon: <RotateCcw size={15} />,
+          onSelect: props.onResetWorkspace,
+        },
+      ],
+    },
+    {
+      id: 'run',
+      label: 'Run',
+      entries: [
+        {
+          id: 'run-toggle',
+          label: props.running ? 'Pause lab' : 'Run lab',
+          icon: props.running ? <Pause size={15} /> : <Play size={15} />,
+          disabled: props.runtimeBusy,
+          onSelect: props.onRunToggle,
+        },
+        {
+          id: 'reset-runtime',
+          label: 'Reset runtime',
+          icon: <RotateCcw size={15} />,
+          disabled: props.runtimeBusy,
+          onSelect: props.onReset,
+        },
+        { type: 'separator', id: 'runtime-mode-separator' },
+        {
+          id: 'simulation-mode',
+          label: props.runtimeMode === 'simulation' ? 'Simulation mode (current)' : 'Use simulation mode',
+          icon: props.runtimeMode === 'simulation' ? <Check size={15} /> : undefined,
+          disabled: props.running || props.runtimeBusy,
+          onSelect: () => props.onRuntimeModeChange('simulation'),
+        },
+        {
+          id: 'native-mode',
+          label: props.runtimeMode === 'native' ? 'Native VM mode (current)' : 'Use native VM mode',
+          icon: props.runtimeMode === 'native' ? <Check size={15} /> : undefined,
+          disabled: props.running || props.runtimeBusy || props.nativeRuntimeState !== 'available',
+          onSelect: () => props.onRuntimeModeChange('native'),
+        },
+      ],
+    },
+    {
+      id: 'help',
+      label: 'Help',
+      entries: [
+        {
+          id: 'lab-guide',
+          label: 'Anycast Lab guide',
+          icon: <BookOpen size={15} />,
+          onSelect: () => { window.open('https://anycast.guide/lab/about/', '_blank', 'noopener,noreferrer'); },
+        },
+        {
+          id: 'source',
+          label: 'Source code and license',
+          icon: <ExternalLink size={15} />,
+          onSelect: () => { window.open('https://github.com/junepark678/anycast_lab', '_blank', 'noopener,noreferrer'); },
+        },
+      ],
+    },
+  ];
+
   return (
     <header className={`lab-header${collapsed ? ' is-toolbar-collapsed' : ''}`}>
       <a
@@ -68,8 +235,10 @@ export function LabHeader(props: Props) {
         <span><strong>anycast</strong><em>lab</em></span>
         {props.embedded && <i className="brand__guide-badge">guide</i>}
       </a>
+      <LabMenuBar menus={menus} ariaLabel="Application menu" />
       <div className="project-name">
         <input
+          ref={projectNameInputRef}
           aria-label="Project name"
           value={projectNameDraft}
           maxLength={MAX_PROJECT_NAME_LENGTH}

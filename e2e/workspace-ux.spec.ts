@@ -234,6 +234,60 @@ test('supports keyboard navigation and focus restoration in topology context men
   await expect(node).toBeFocused();
 });
 
+test('provides application menus for project, edit, view, and runtime actions', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('./');
+
+  const menuBar = page.getByRole('menubar', { name: 'Application menu' });
+  const fileTrigger = menuBar.getByRole('menuitem', { name: 'File' });
+  await expect(menuBar.getByRole('menuitem')).toHaveText(['File', 'Edit', 'View', 'Run', 'Help']);
+
+  await fileTrigger.click();
+  const fileMenu = page.getByRole('menu', { name: 'File menu' });
+  await expect(fileMenu.getByRole('menuitem', { name: 'Save now' })).toBeEnabled();
+  await fileMenu.getByRole('menuitem', { name: 'Save now' }).press('Enter');
+  await expect(page.getByRole('status')).toContainText('Project saved locally.');
+  await expect(fileTrigger).toBeFocused();
+
+  await fileTrigger.click();
+  await fileMenu.getByRole('menuitem', { name: 'Manage projects…' }).press('Enter');
+  const projectManager = page.getByRole('dialog', { name: 'Projects' });
+  await projectManager.getByRole('button', { name: 'Close Projects' }).click();
+  await expect(fileTrigger).toBeFocused();
+
+  await menuBar.getByRole('menuitem', { name: 'Edit' }).click();
+  await expect(page.getByRole('menuitem', { name: 'Delete selection' })).toBeDisabled();
+  await page.getByRole('menu', { name: 'Edit menu' }).press('Escape');
+
+  await menuBar.getByRole('menuitem', { name: 'View' }).click();
+  await page.getByRole('menuitem', { name: 'Hide appliance palette' }).click();
+  await expect(page.getByRole('button', { name: 'Expand appliance palette' })).toBeVisible();
+
+  await menuBar.getByRole('menuitem', { name: 'View' }).click();
+  await page.getByRole('menuitem', { name: 'Hide details panel' }).click();
+  await expect(page.getByRole('button', { name: 'Expand details panel' })).toBeVisible();
+
+  await menuBar.getByRole('menuitem', { name: 'View' }).click();
+  await page.getByRole('menuitem', { name: 'Reset workspace layout' }).click();
+  await expect(page.getByRole('button', { name: 'Collapse appliance palette' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Collapse details panel' })).toBeVisible();
+
+  await menuBar.getByRole('menuitem', { name: 'Run' }).click();
+  await expect(page.getByRole('menuitem', { name: 'Run lab' })).toBeEnabled();
+  await expect(page.getByRole('menuitem', { name: 'Simulation mode (current)' })).toBeVisible();
+});
+
+test('accepts Backspace as the workspace Delete shortcut outside text fields', async ({ page }) => {
+  await page.goto('./');
+  const nodes = page.locator('.react-flow__node');
+  const initialNodeCount = await nodes.count();
+
+  await page.getByTestId('rf__node-pop-frankfurt').click();
+  await page.keyboard.press('Backspace');
+
+  await expect(nodes).toHaveCount(initialNodeCount - 1);
+});
+
 test('minimizes and restores both side toolbars while giving space back to the canvas', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('./');
@@ -355,10 +409,69 @@ test('keeps the mobile workspace usable with overlay side panels and no horizont
   await expect(page.getByRole('button', { name: 'Collapse details panel' })).toBeVisible();
   await expect.poll(async () => (await canvas.boundingBox())?.width ?? 0).toBeGreaterThanOrEqual(collapsedWidth - 1);
 
+  const mobileMenu = page.getByRole('menubar', { name: 'Application menu' });
+  await mobileMenu.getByRole('menuitem', { name: 'Menu' }).click();
+  await page.getByRole('menuitem', { name: 'View: Reset workspace layout' }).click();
+  await expect(page.getByRole('button', { name: 'Expand appliance palette' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Expand details panel' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Expand workspace toolbar' })).toBeVisible();
+
   await expect.poll(() => page.evaluate(() => ({
     viewport: document.documentElement.clientWidth,
     content: document.documentElement.scrollWidth,
   }))).toEqual({ viewport: 390, content: 390 });
+});
+
+test('uses the compact application menu until tablet and inline-toolbar headers fit', async ({ page }) => {
+  for (const width of [768, 1120]) {
+    await page.setViewportSize({ width, height: 1024 });
+    await page.goto('./');
+
+    const menuBar = page.getByRole('menubar', { name: 'Application menu' });
+    await expect(menuBar.getByRole('menuitem', { name: 'Menu' })).toBeVisible();
+    await expect(menuBar.getByRole('menuitem', { name: 'File' })).toHaveCount(0);
+
+    const saveState = page.locator('.save-state');
+    const runButton = page.getByRole('button', { name: 'Run', exact: true });
+    await expect(saveState).toBeVisible();
+    const [saveBounds, runBounds] = await Promise.all([saveState.boundingBox(), runButton.boundingBox()]);
+    expect(saveBounds).not.toBeNull();
+    expect(runBounds).not.toBeNull();
+    expect(saveBounds!.x + saveBounds!.width).toBeLessThanOrEqual(runBounds!.x);
+  }
+});
+
+test('recomputes responsive workspace defaults when reset follows a resize', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('./');
+  await expect(page.getByRole('button', { name: 'Collapse appliance palette' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Collapse details panel' })).toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const menuBar = page.getByRole('menubar', { name: 'Application menu' });
+  await menuBar.getByRole('menuitem', { name: 'Menu' }).click();
+  await page.getByRole('menuitem', { name: 'View: Reset workspace layout' }).click();
+
+  await expect(page.getByRole('button', { name: 'Expand appliance palette' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Expand details panel' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Expand workspace toolbar' })).toBeVisible();
+});
+
+test('resets embedded workspaces to their collapsed defaults', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('./?embed=guide');
+
+  await page.getByRole('button', { name: 'Expand appliance palette' }).click();
+  await page.getByRole('button', { name: 'Expand details panel' }).click();
+  await page.getByRole('button', { name: 'Expand workspace toolbar' }).click();
+
+  const menuBar = page.getByRole('menubar', { name: 'Application menu' });
+  await menuBar.getByRole('menuitem', { name: 'View' }).click();
+  await page.getByRole('menuitem', { name: 'Reset workspace layout' }).click();
+
+  await expect(page.getByRole('button', { name: 'Expand appliance palette' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Expand details panel' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Expand workspace toolbar' })).toBeVisible();
 });
 
 test('switches compact dock views without clipping their content', async ({ page }) => {

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { createRef } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LabHeader } from './LabHeader';
@@ -7,7 +7,14 @@ afterEach(cleanup);
 
 function renderHeader(
   persistenceReady: boolean,
-  callbacks: { onProjectNameChange?: ReturnType<typeof vi.fn>; onManageProjects?: ReturnType<typeof vi.fn> } = {},
+  callbacks: {
+    onProjectNameChange?: ReturnType<typeof vi.fn>;
+    onManageProjects?: ReturnType<typeof vi.fn>;
+    onSave?: ReturnType<typeof vi.fn>;
+    onDeleteSelection?: ReturnType<typeof vi.fn>;
+    onTogglePalette?: ReturnType<typeof vi.fn>;
+  } = {},
+  options: { selectionType?: 'node' | 'link' | null; paletteCollapsed?: boolean } = {},
 ) {
   const noop = vi.fn();
   return render(<LabHeader
@@ -27,9 +34,16 @@ function renderHeader(
     onRuntimeModeChange={noop}
     onRunToggle={noop}
     onReset={noop}
-    onSave={noop}
+    onSave={callbacks.onSave ?? noop}
     onExport={noop}
     onImport={noop}
+    selectionType={options.selectionType ?? null}
+    paletteCollapsed={options.paletteCollapsed ?? false}
+    detailsCollapsed={false}
+    onDeleteSelection={callbacks.onDeleteSelection ?? noop}
+    onTogglePalette={callbacks.onTogglePalette ?? noop}
+    onToggleDetails={noop}
+    onResetWorkspace={noop}
   />);
 }
 
@@ -78,5 +92,41 @@ describe('LabHeader persistence readiness', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Manage projects' }));
     expect(manage).toHaveBeenCalledOnce();
+  });
+
+  it('exposes desktop-style application menus and routes file actions', () => {
+    const save = vi.fn();
+    renderHeader(true, { onSave: save });
+
+    const menuBar = screen.getByRole('menubar', { name: 'Application menu' });
+    expect(within(menuBar).getAllByRole('menuitem').map((item) => item.textContent)).toEqual([
+      'File',
+      'Edit',
+      'View',
+      'Run',
+      'Help',
+    ]);
+
+    fireEvent.click(within(menuBar).getByRole('menuitem', { name: 'File' }));
+    const fileMenu = screen.getByRole('menu', { name: 'File menu' });
+    fireEvent.click(within(fileMenu).getByRole('menuitem', { name: 'Save now' }));
+    expect(save).toHaveBeenCalledOnce();
+  });
+
+  it('maps edit and view menu actions to the active workspace state', () => {
+    const deleteSelection = vi.fn();
+    const togglePalette = vi.fn();
+    renderHeader(true, { onDeleteSelection: deleteSelection, onTogglePalette: togglePalette }, {
+      selectionType: 'node',
+      paletteCollapsed: true,
+    });
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete selected node' }));
+    expect(deleteSelection).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'View' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Show appliance palette' }));
+    expect(togglePalette).toHaveBeenCalledOnce();
   });
 });
