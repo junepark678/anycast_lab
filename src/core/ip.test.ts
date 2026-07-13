@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addressInPrefix, compareIp, normalizePrefix, parseIp, parsePrefix, prefixesOverlap } from './ip';
+import { addressInPrefix, compareIp, normalizePrefix, parseIp, parsePrefix, prefixesOverlap, tryParsePrefix } from './ip';
 
 describe('IP primitives', () => {
   it.each([
@@ -26,7 +26,12 @@ describe('IP primitives', () => {
     expect(compareIp('255.255.255.255', '::1')).toBeLessThan(0);
   });
 
-  it.each(['300.1.1.1', '192.0.2', '2001:::1', '2001:db8::/129', '10.0.0.1/33'])('rejects malformed input %s', (input) => {
+  it.each(['300.1.1.1', '192.0.2', '2001:::1', '2001:db8::/129', '10.0.0.1/33', '192.0.2.1/'])('rejects malformed input %s', (input) => {
     expect(() => input.includes('/') ? parsePrefix(input) : parseIp(input)).toThrow();
+  });
+
+  it('does not reinterpret an empty prefix length as a default route', () => {
+    expect(tryParsePrefix('192.0.2.1/')).toBeUndefined();
+    expect(() => normalizePrefix('192.0.2.1/')).toThrow();
   });
 });

@@ -159,7 +159,11 @@ export function parsePrefix(input: string): ParsedPrefix {
   const slash = trimmed.lastIndexOf('/');
   const addressText = slash >= 0 ? trimmed.slice(0, slash) : trimmed;
   const address = parseIp(addressText);
-  const prefixLength = slash >= 0 ? Number(trimmed.slice(slash + 1)) : address.bits;
+  const prefixLengthText = slash >= 0 ? trimmed.slice(slash + 1) : undefined;
+  if (prefixLengthText !== undefined && !/^\d+$/.test(prefixLengthText)) {
+    throw new IpParseError(`Invalid prefix length in ${input}`, input);
+  }
+  const prefixLength = prefixLengthText === undefined ? address.bits : Number(prefixLengthText);
   if (!Number.isInteger(prefixLength) || prefixLength < 0 || prefixLength > address.bits) {
     throw new IpParseError(`Invalid prefix length in ${input}`, input);
   }
