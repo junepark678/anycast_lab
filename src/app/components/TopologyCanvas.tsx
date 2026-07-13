@@ -350,7 +350,6 @@ export function TopologyCanvas({
           maskColor="rgba(10, 12, 16, 0.7)"
         />
       </ReactFlow>
-      {isDropTarget && <div className="topology-drop-hint" aria-hidden="true">Drop to add appliance</div>}
       {menu && activeMenu && (
         <ContextMenu
           key={menu.instance}

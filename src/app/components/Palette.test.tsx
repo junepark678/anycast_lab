@@ -22,6 +22,16 @@ describe('Palette', () => {
     expect(onAdd).toHaveBeenCalledWith('frr');
   });
 
+  it('omits drag instructions without changing draggable controls', () => {
+    render(<Palette onAdd={vi.fn()} />);
+
+    expect(screen.queryByText(/drag|drop/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /BIRD/ }))
+      .toHaveAttribute('draggable', 'true');
+    expect(screen.getByRole('button', { name: /BIRD/ }))
+      .not.toHaveAttribute('title');
+  });
+
   it('publishes both the application MIME payload and a text fallback while dragging', () => {
     render(<Palette onAdd={vi.fn()} />);
     const bird = screen.getByRole('button', { name: /BIRD/ });

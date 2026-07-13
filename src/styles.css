@@ -140,7 +140,6 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
 .topology-canvas { position: relative; grid-column: 2; min-width: 0; min-height: 0; background: #0f1115; }
 .topology-canvas::after { content: ''; position: absolute; inset: 5px; z-index: 6; border: 1px dashed transparent; border-radius: 8px; pointer-events: none; transition: border-color .15s ease, background .15s ease; }
 .topology-canvas--drag-over::after { border-color: var(--teal); background: rgba(121, 186, 160, .055); }
-.topology-drop-hint { position: absolute; top: 16px; left: 50%; z-index: 8; padding: 7px 11px; transform: translateX(-50%); border: 1px solid #3d765f; border-radius: 6px; background: rgba(25, 53, 41, .94); box-shadow: 0 8px 24px rgba(0, 0, 0, .3); color: var(--teal-strong); font-size: 10px; font-weight: 700; pointer-events: none; }
 .react-flow__background { background: radial-gradient(circle at 50% 25%, rgba(121,186,160,.04), transparent 42%); }
 .react-flow__controls { overflow: hidden; border: 1px solid var(--line) !important; border-radius: 6px !important; box-shadow: none !important; }
 .react-flow__controls-button { border-bottom-color: var(--line) !important; background: var(--panel-raised) !important; fill: #c7cbd4 !important; }

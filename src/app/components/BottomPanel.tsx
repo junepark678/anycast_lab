@@ -231,7 +231,7 @@ export function BottomPanel({
                   autoComplete="off"
                   spellCheck={false}
                   disabled={!activeConsoleId}
-                  placeholder={!activeConsoleId ? 'Drag an appliance onto the canvas to open a console.' : runtimeMode === 'native' ? 'birdc show protocols, vtysh -c "show bgp summary", ping …' : 'show protocols, show bgp summary, ping …'}
+                  placeholder={!activeConsoleId ? 'Select an appliance to open a console.' : runtimeMode === 'native' ? 'birdc show protocols, vtysh -c "show bgp summary", ping …' : 'show protocols, show bgp summary, ping …'}
                 />
               </form>
             </div>

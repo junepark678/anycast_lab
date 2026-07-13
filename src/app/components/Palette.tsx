@@ -51,7 +51,6 @@ export function Palette({ onAdd, disabled = false, collapsed = false, onToggle }
           <div className="panel-heading">
             <span>Appliances</span>
             <span className="panel-heading__actions">
-              <small>Drag to canvas</small>
               <button
                 type="button"
                 className="panel-toggle"
@@ -73,16 +72,13 @@ export function Palette({ onAdd, disabled = false, collapsed = false, onToggle }
                 onDragStart={(event) => beginDrag(event, kind)}
                 onDragEnd={(event) => event.currentTarget.classList.remove('is-dragging')}
                 onClick={() => onAdd(kind)}
-                title={`Drag ${label} onto the topology or click to add`}
               >
                 <Icon size={18} strokeWidth={1.8} />
                 <span><strong>{label}</strong><small>{note}</small></span>
               </button>
             ))}
           </div>
-          <div className="palette__help">
-            {disabled ? 'Reset the native runtime before changing topology.' : 'Drag an appliance into the workspace, then connect nodes by dragging between their ports. Right-click for quick actions.'}
-          </div>
+          {disabled && <div className="palette__help">Reset the native runtime before changing topology.</div>}
           <div className="palette__license">
             <a href="https://github.com/junepark678/anycast_lab" target="_blank" rel="noreferrer">Source · AGPL-3.0</a>
             <span>Provided without warranty.</span>
